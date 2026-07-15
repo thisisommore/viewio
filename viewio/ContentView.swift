@@ -73,6 +73,10 @@ private struct RecordingStartView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 32) {
+                    if let errorMessage {
+                        errorBanner(message: errorMessage)
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
                         Text("New Recording")
                             .font(.system(size: 26, weight: .bold))
@@ -91,20 +95,12 @@ private struct RecordingStartView: View {
 
             Divider()
 
-            VStack(spacing: 16) {
-                if let errorMessage {
-                    errorBanner(message: errorMessage)
-                }
-
-                Button(action: onRecord) {
-                    Text("Start Recording")
-                        .font(.system(size: 16, weight: .semibold))
-                }
-                .buttonStyle(RecordButtonStyle(isDisabled: isPreparing))
-                .disabled(isPreparing)
+            Button(action: onRecord) {
+                Text("Start Recording")
+                    .font(.system(size: 16, weight: .semibold))
             }
-            .padding(24)
-            .background(.bar)
+            .buttonStyle(RecordButtonStyle(isDisabled: isPreparing))
+            .disabled(isPreparing)
         }
     }
 
@@ -140,13 +136,12 @@ private struct RecordButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .frame(height: 50)
+            .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44)
             .background {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(isDisabled ? Color.primary.opacity(0.35) : Color.primary.opacity(configuration.isPressed ? 0.85 : 1))
+                Rectangle()
+                    .fill(isDisabled ? Color.red.opacity(0.4) : Color.red.opacity(configuration.isPressed ? 0.85 : 1))
             }
-            .contentShape(RoundedRectangle(cornerRadius: 12))
+            .contentShape(Rectangle())
     }
 }
 
