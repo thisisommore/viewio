@@ -10,8 +10,9 @@ import SwiftUI
 @main
 struct viewioApp: App {
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("") {
             ContentView()
         }
+        .windowStyle(.hiddenTitleBar)
     }
 }
