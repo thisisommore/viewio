@@ -13,6 +13,8 @@ struct ContentView: View {
     @State private var hasMockVideo = true
     @State private var zoomRanges: [ZoomRange] = [ZoomRange(start: 2, end: 4)]
     @State private var cuts: [Double] = []
+    @State private var segmentSpeeds: [Double] = [1.0]
+    @State private var selectedSegment = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,13 +23,21 @@ struct ContentView: View {
                 hasVideo: hasMockVideo,
                 zoomRanges: zoomRanges,
                 playhead: playhead,
-                onCut: cutAtPlayhead
+                onCut: cutAtPlayhead,
+                selectedSpeed: selectedSpeed,
+                hasSpeedSelection: !segmentSpeeds.isEmpty,
+                onSpeedChange: updateSelectedSpeed
             )
 
             Divider()
 
-            Timeline(playhead: $playhead, cuts: $cuts)
-                .frame(height: 208)
+            Timeline(
+                playhead: $playhead,
+                cuts: $cuts,
+                speeds: $segmentSpeeds,
+                selectedSegment: $selectedSegment
+            )
+            .frame(height: 208)
 
             Divider()
 
@@ -41,7 +51,21 @@ struct ContentView: View {
     private func cutAtPlayhead() {
         guard playhead > 0.05, playhead < 11.95 else { return }
         guard !cuts.contains(where: { abs($0 - playhead) < 0.05 }) else { return }
-        cuts.append(playhead)
+        let cutIndex = cuts.firstIndex(where: { $0 > playhead }) ?? cuts.count
+        cuts.insert(playhead, at: cutIndex)
+        let segmentIndex = min(cutIndex + 1, segmentSpeeds.count)
+        segmentSpeeds.insert(1.0, at: segmentIndex)
+        selectedSegment = min(segmentIndex, segmentSpeeds.count - 1)
+    }
+
+    private var selectedSpeed: Double {
+        guard segmentSpeeds.indices.contains(selectedSegment) else { return 1.0 }
+        return segmentSpeeds[selectedSegment]
+    }
+
+    private func updateSelectedSpeed(_ speed: Double) {
+        guard segmentSpeeds.indices.contains(selectedSegment) else { return }
+        segmentSpeeds[selectedSegment] = speed
     }
 }
 
@@ -51,10 +75,13 @@ private struct PreviewWorkspace: View {
     let zoomRanges: [ZoomRange]
     let playhead: Double
     let onCut: () -> Void
+    let selectedSpeed: Double
+    let hasSpeedSelection: Bool
+    let onSpeedChange: (Double) -> Void
 
     var body: some View {
         GeometryReader { proxy in
-            HStack(alignment: .bottom, spacing: 28) {
+            HStack(alignment: .top, spacing: 28) {
                 if hasVideo {
                     VideoPreview(isZoomed: zoomRanges.contains { $0.start...$0.end ~= playhead })
                         .aspectRatio(16 / 9, contentMode: .fit)
@@ -67,8 +94,17 @@ private struct PreviewWorkspace: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
-                PlaybackControls(isPlaying: $isPlaying, onCut: onCut)
-                    .padding(.bottom, 4)
+                VStack(alignment: .trailing, spacing: 16) {
+                    PlaybackControls(isPlaying: $isPlaying, onCut: onCut)
+
+                    SpeedInspector(
+                        speed: selectedSpeed,
+                        hasSelection: hasSpeedSelection,
+                        onChange: onSpeedChange
+                    )
+                    .frame(width: 180, height: 120)
+                }
+                .padding(.bottom, 4)
             }
             .padding(.trailing, 26)
             .padding(.bottom, 28)
@@ -163,6 +199,8 @@ private struct PlaybackControls: View {
 private struct Timeline: View {
     @Binding var playhead: Double
     @Binding var cuts: [Double]
+    @Binding var speeds: [Double]
+    @Binding var selectedSegment: Int
     private let duration = 12.0
 
     var body: some View {
@@ -216,10 +254,29 @@ private struct Timeline: View {
                                     width: max(1, trackWidth * CGFloat((end - start) / duration) - 2),
                                     height: 58
                                 )
+                                .overlay(alignment: .topTrailing) {
+                                    Text(speedLabel(for: index))
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 3)
+                                        .background(Color.black.opacity(0.55))
+                                }
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(
+                                            index == selectedSegment ? Color.accentColor : .clear,
+                                            lineWidth: 2
+                                        )
+                                }
                                 .offset(
                                     x: trackWidth * CGFloat(start / duration),
                                     y: 42
                                 )
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedSegment = index
+                                }
                         }
 
                         Rectangle()
@@ -258,6 +315,11 @@ private struct Timeline: View {
     private var segmentBoundaries: [Double] {
         [0] + cuts.sorted() + [duration]
     }
+
+    private func speedLabel(for index: Int) -> String {
+        let speed = speeds.indices.contains(index) ? speeds[index] : 1.0
+        return String(format: "%.2gx", speed)
+    }
 }
 
 private struct TimelineClip: View {
@@ -284,6 +346,51 @@ private struct TimelineClip: View {
         .overlay {
             RoundedRectangle(cornerRadius: 4)
                 .stroke(.black.opacity(0.55), lineWidth: 1)
+        }
+    }
+}
+
+private struct SpeedInspector: View {
+    let speed: Double
+    let hasSelection: Bool
+    let onChange: (Double) -> Void
+
+    private let options = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("SPEED")
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(0.7)
+                .foregroundStyle(.secondary)
+
+            if hasSelection {
+                Text(String(format: "%.2gx", speed))
+                    .font(.system(size: 24, weight: .medium, design: .monospaced))
+
+                Picker("Speed", selection: Binding(
+                    get: { speed },
+                    set: onChange
+                )) {
+                    ForEach(options, id: \.self) { option in
+                        Text(String(format: "%.2gx", option))
+                            .tag(option)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            } else {
+                Text("Select a clip")
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(alignment: .leading) {
+            Divider()
         }
     }
 }
