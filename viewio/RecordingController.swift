@@ -8,6 +8,12 @@ import Combine
 import Foundation
 @preconcurrency import ScreenCaptureKit
 
+struct AudioDevice: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let isDefault: Bool
+}
+
 @MainActor
 final class RecordingController: NSObject, ObservableObject {
     enum State: Equatable {
@@ -21,6 +27,10 @@ final class RecordingController: NSObject, ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var elapsed: TimeInterval = 0
+    @Published var captureSystemAudio = true
+    @Published var captureMicrophone = false
+    @Published var selectedMicrophoneID: String?
+    @Published private(set) var availableMicrophones: [AudioDevice] = []
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -37,6 +47,11 @@ final class RecordingController: NSObject, ObservableObject {
         }
     }
 
+    override init() {
+        super.init()
+        discoverMicrophones()
+    }
+
     func startRecording() {
         guard !isRecording else { return }
 
@@ -45,6 +60,12 @@ final class RecordingController: NSObject, ObservableObject {
 
         Task {
             do {
+                if captureMicrophone {
+                    let authorized = await requestMicrophoneAuthorization()
+                    guard authorized else {
+                        throw RecordingError.microphoneDenied
+                    }
+                }
                 try await configureAndStartCapture()
             } catch {
                 finishWithError(error)
@@ -95,8 +116,10 @@ final class RecordingController: NSObject, ObservableObject {
         configuration.queueDepth = 5
         configuration.showsCursor = true
         configuration.showMouseClicks = true
-        configuration.capturesAudio = true
+        configuration.capturesAudio = captureSystemAudio
         configuration.excludesCurrentProcessAudio = true
+        configuration.captureMicrophone = captureMicrophone
+        configuration.microphoneCaptureDeviceID = selectedMicrophoneID
 
         let recordingConfiguration = SCRecordingOutputConfiguration()
         recordingConfiguration.outputURL = outputURL
@@ -190,6 +213,40 @@ final class RecordingController: NSObject, ObservableObject {
             outputURL = nil
         }
     }
+
+    private func discoverMicrophones() {
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        let defaultDevice = AVCaptureDevice.default(for: .audio)
+        availableMicrophones = session.devices.map { device in
+            AudioDevice(
+                id: device.uniqueID,
+                name: device.localizedName,
+                isDefault: device.uniqueID == defaultDevice?.uniqueID
+            )
+        }
+    }
+
+    private func requestMicrophoneAuthorization() async -> Bool {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch status {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .audio) { granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+        case .denied, .restricted:
+            return false
+        @unknown default:
+            return false
+        }
+    }
 }
 
 extension RecordingController: SCRecordingOutputDelegate {
@@ -223,11 +280,14 @@ extension RecordingController: SCStreamDelegate {
 
 private enum RecordingError: LocalizedError {
     case noDisplay
+    case microphoneDenied
 
     var errorDescription: String? {
         switch self {
         case .noDisplay:
             "No display is available to record."
+        case .microphoneDenied:
+            "Microphone access was denied. Enable it in System Settings to record microphone audio."
         }
     }
 }

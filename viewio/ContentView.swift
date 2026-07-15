@@ -15,6 +15,7 @@ struct ContentView: View {
             switch recorder.state {
             case .idle:
                 RecordingStartView(
+                    recorder: recorder,
                     isPreparing: false,
                     onRecord: recorder.startRecording
                 )
@@ -49,6 +50,7 @@ struct ContentView: View {
 
             case let .failed(message):
                 RecordingStartView(
+                    recorder: recorder,
                     isPreparing: false,
                     errorMessage: message,
                     onRecord: recorder.startRecording,
@@ -63,6 +65,7 @@ struct ContentView: View {
 }
 
 private struct RecordingStartView: View {
+    @ObservedObject var recorder: RecordingController
     let isPreparing: Bool
     var errorMessage: String?
     let onRecord: () -> Void
@@ -95,6 +98,8 @@ private struct RecordingStartView: View {
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 460)
                 }
+
+                AudioOptionsView(recorder: recorder, isPreparing: isPreparing)
 
                 Button(action: onRecord) {
                     Label("Start recording", systemImage: "record.circle.fill")
@@ -135,6 +140,43 @@ private struct RecordingStartView: View {
 
             Spacer()
         }
+    }
+}
+
+private struct AudioOptionsView: View {
+    @ObservedObject var recorder: RecordingController
+    let isPreparing: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Audio")
+                .font(.system(size: 13, weight: .semibold))
+
+            Toggle("System audio", isOn: $recorder.captureSystemAudio)
+                .disabled(isPreparing)
+
+            Toggle("Microphone", isOn: $recorder.captureMicrophone)
+                .disabled(isPreparing)
+
+            if recorder.captureMicrophone {
+                Picker("Microphone device", selection: $recorder.selectedMicrophoneID) {
+                    Text("System Default").tag(String?.none)
+                    ForEach(recorder.availableMicrophones) { device in
+                        Text(device.name).tag(device.id as String?)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .disabled(isPreparing || recorder.availableMicrophones.isEmpty)
+
+                Text("Microphone access is requested by macOS the first time you enable it.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: 280, alignment: .leading)
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
