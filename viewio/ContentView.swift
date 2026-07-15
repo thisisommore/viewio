@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var playhead: Double = 4.0
     @State private var hasMockVideo = true
     @State private var zoomRanges: [ZoomRange] = [ZoomRange(start: 2, end: 4)]
+    @State private var cuts: [Double] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,12 +20,13 @@ struct ContentView: View {
                 isPlaying: $isPlaying,
                 hasVideo: hasMockVideo,
                 zoomRanges: zoomRanges,
-                playhead: playhead
+                playhead: playhead,
+                onCut: cutAtPlayhead
             )
 
             Divider()
 
-            Timeline(playhead: $playhead)
+            Timeline(playhead: $playhead, cuts: $cuts)
                 .frame(height: 208)
 
             Divider()
@@ -35,6 +37,12 @@ struct ContentView: View {
         .frame(minWidth: 920, minHeight: 660)
         .background(Color(nsColor: .windowBackgroundColor))
     }
+
+    private func cutAtPlayhead() {
+        guard playhead > 0.05, playhead < 11.95 else { return }
+        guard !cuts.contains(where: { abs($0 - playhead) < 0.05 }) else { return }
+        cuts.append(playhead)
+    }
 }
 
 private struct PreviewWorkspace: View {
@@ -42,6 +50,7 @@ private struct PreviewWorkspace: View {
     let hasVideo: Bool
     let zoomRanges: [ZoomRange]
     let playhead: Double
+    let onCut: () -> Void
 
     var body: some View {
         GeometryReader { proxy in
@@ -58,7 +67,7 @@ private struct PreviewWorkspace: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
-                PlaybackControls(isPlaying: $isPlaying)
+                PlaybackControls(isPlaying: $isPlaying, onCut: onCut)
                     .padding(.bottom, 4)
             }
             .padding(.trailing, 26)
@@ -121,6 +130,7 @@ private struct VideoPreview: View {
 
 private struct PlaybackControls: View {
     @Binding var isPlaying: Bool
+    let onCut: () -> Void
 
     var body: some View {
         ControlGroup {
@@ -140,6 +150,11 @@ private struct PlaybackControls: View {
                 Image(systemName: "goforward.10")
             }
             .help("Forward 10 seconds")
+
+            Button(action: onCut) {
+                Image(systemName: "scissors")
+            }
+            .help("Cut at playhead")
         }
         .controlSize(.large)
     }
@@ -147,6 +162,7 @@ private struct PlaybackControls: View {
 
 private struct Timeline: View {
     @Binding var playhead: Double
+    @Binding var cuts: [Double]
     private let duration = 12.0
 
     var body: some View {
@@ -193,9 +209,18 @@ private struct Timeline: View {
                             .offset(x: position, y: 8)
                         }
 
-                        TimelineClip()
-                            .frame(width: trackWidth, height: 58)
-                            .offset(y: 42)
+                        ForEach(Array(segmentBoundaries.dropLast().enumerated()), id: \.offset) { index, start in
+                            let end = segmentBoundaries[index + 1]
+                            TimelineClip()
+                                .frame(
+                                    width: max(1, trackWidth * CGFloat((end - start) / duration) - 2),
+                                    height: 58
+                                )
+                                .offset(
+                                    x: trackWidth * CGFloat(start / duration),
+                                    y: 42
+                                )
+                        }
 
                         Rectangle()
                             .fill(.black)
@@ -228,6 +253,10 @@ private struct Timeline: View {
     private var timecode: String {
         let frames = Int((playhead - floor(playhead)) * 24)
         return String(format: "00:00:%02d:%02d", Int(playhead), frames)
+    }
+
+    private var segmentBoundaries: [Double] {
+        [0] + cuts.sorted() + [duration]
     }
 }
 
