@@ -364,13 +364,12 @@ final class EditorModel: ObservableObject {
         layerInstruction.setTransform(baseTransform, at: .zero)
 
         let zoomTransform = baseTransform.concatenating(centeredZoomTransform(renderSize: renderSize))
-        for event in zoomTransformEvents(
+        applyZoomRamps(
+            to: layerInstruction,
             baseTransform: baseTransform,
             zoomTransform: zoomTransform,
             duration: duration.seconds
-        ) {
-            layerInstruction.setTransform(event.transform, at: event.time)
-        }
+        )
 
         instruction.layerInstructions = [layerInstruction]
         videoComposition.instructions = [instruction]
@@ -386,24 +385,40 @@ final class EditorModel: ObservableObject {
         .scaledBy(x: scale, y: scale)
     }
 
-    private func zoomTransformEvents(
+    private func applyZoomRamps(
+        to layerInstruction: AVMutableVideoCompositionLayerInstruction,
         baseTransform: CGAffineTransform,
         zoomTransform: CGAffineTransform,
         duration: Double
-    ) -> [(time: CMTime, transform: CGAffineTransform)] {
-        var events: [(time: Double, transform: CGAffineTransform)] = []
-
-        for range in zoomRanges {
+    ) {
+        let transitionDuration = 0.35
+        for range in zoomRanges.sorted(by: { $0.start < $1.start }) {
             let start = min(duration, max(0, range.start))
             let end = min(duration, max(start, range.end))
             guard end > start else { continue }
-            events.append((start, zoomTransform))
-            events.append((end, baseTransform))
-        }
 
-        return events
-            .sorted { $0.time < $1.time }
-            .map { (CMTime(seconds: $0.time, preferredTimescale: 600), $0.transform) }
+            let transition = min(transitionDuration, (end - start) / 2)
+            let startTime = CMTime(seconds: start, preferredTimescale: 600)
+            let zoomInEnd = CMTime(seconds: start + transition, preferredTimescale: 600)
+            let zoomOutStart = CMTime(seconds: end - transition, preferredTimescale: 600)
+            let endTime = CMTime(seconds: end, preferredTimescale: 600)
+
+            if transition > 0.01 {
+                layerInstruction.setTransformRamp(
+                    fromStart: baseTransform,
+                    toEnd: zoomTransform,
+                    timeRange: CMTimeRange(start: startTime, end: zoomInEnd)
+                )
+                layerInstruction.setTransformRamp(
+                    fromStart: zoomTransform,
+                    toEnd: baseTransform,
+                    timeRange: CMTimeRange(start: zoomOutStart, end: endTime)
+                )
+            } else {
+                layerInstruction.setTransform(zoomTransform, at: startTime)
+                layerInstruction.setTransform(baseTransform, at: endTime)
+            }
+        }
     }
 
     private func startExport(to outputURL: URL) {

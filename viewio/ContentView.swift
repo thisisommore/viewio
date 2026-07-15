@@ -117,6 +117,11 @@ private struct RecordingStartView: View {
                     Text(errorMessage)
                         .lineLimit(2)
                     Spacer()
+                    Button("Open Settings") {
+                        if let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                            NSWorkspace.shared.open(settingsURL)
+                        }
+                    }
                     Button("Dismiss") {
                         onDismissError?()
                     }
