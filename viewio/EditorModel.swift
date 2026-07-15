@@ -126,6 +126,8 @@ final class EditorModel: ObservableObject {
     @Published private(set) var zoomRanges: [ZoomRange] = []
     @Published var selectedClipID: UUID?
     @Published var selectedZoomID: UUID?
+
+    private var cursorTrack: [CursorPosition] = []
     @Published var isPlaying = false
 
     private var sourceAsset: AVURLAsset?
@@ -324,6 +326,18 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    private func loadCursorTrack() -> [CursorPosition] {
+        let trackURL = sourceURL.deletingPathExtension().appendingPathExtension("cursor.json")
+        guard FileManager.default.fileExists(atPath: trackURL.path) else { return [] }
+        do {
+            let data = try Data(contentsOf: trackURL)
+            return try JSONDecoder().decode([CursorPosition].self, from: data)
+        } catch {
+            print("Failed to load cursor track: \(error)")
+            return []
+        }
+    }
+
     private func loadSource() async {
         let asset = AVURLAsset(url: sourceURL)
 
@@ -344,6 +358,7 @@ final class EditorModel: ObservableObject {
             sourceAsset = asset
             sourceVideoTrack = videoTrack
             sourceAudioTracks = audioTracks
+            cursorTrack = loadCursorTrack()
             clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
             selectedClipID = clips.first?.id
             duration = seconds
@@ -459,13 +474,51 @@ final class EditorModel: ObservableObject {
         return videoComposition
     }
 
-    private func centeredZoomTransform(renderSize: CGSize, amount: Double) -> CGAffineTransform {
-        let scale = CGFloat(min(3, max(1, amount)))
-        return CGAffineTransform(
-            translationX: renderSize.width * (1 - scale) / 2,
-            y: renderSize.height * (1 - scale) / 2
-        )
-        .scaledBy(x: scale, y: scale)
+    private func zoomTransform(
+        renderSize: CGSize,
+        scale: CGFloat,
+        center: CGPoint
+    ) -> CGAffineTransform {
+        let anchorX = center.x * renderSize.width
+        let anchorY = center.y * renderSize.height
+        return CGAffineTransform(translationX: (1 - scale) * anchorX, y: (1 - scale) * anchorY)
+            .scaledBy(x: scale, y: scale)
+    }
+
+    private func cursorPosition(at time: Double) -> CGPoint {
+        guard !cursorTrack.isEmpty else { return CGPoint(x: 0.5, y: 0.5) }
+        if let index = cursorTrack.firstIndex(where: { $0.time >= time }) {
+            if index == 0 { return CGPoint(x: cursorTrack[0].x, y: cursorTrack[0].y) }
+            let previous = cursorTrack[index - 1]
+            let next = cursorTrack[index]
+            let t = (time - previous.time) / max(0.001, next.time - previous.time)
+            return CGPoint(
+                x: previous.x + (next.x - previous.x) * t,
+                y: previous.y + (next.y - previous.y) * t
+            )
+        }
+        if let last = cursorTrack.last {
+            return CGPoint(x: last.x, y: last.y)
+        }
+        return CGPoint(x: 0.5, y: 0.5)
+    }
+
+    private func zoomScale(at time: Double, range: ZoomRange, transition: Double) -> CGFloat {
+        let amount = CGFloat(min(3, max(1, range.amount)))
+        let relativeTime = time - range.start
+        let rangeDuration = range.end - range.start
+
+        if relativeTime < transition {
+            let progress = transition > 0 ? relativeTime / transition : 1
+            let eased = range.entryAnimation.progress(at: progress)
+            return 1 + (amount - 1) * CGFloat(eased)
+        } else if relativeTime > rangeDuration - transition {
+            let progress = transition > 0 ? (rangeDuration - relativeTime) / transition : 1
+            let eased = range.exitAnimation.progress(at: progress)
+            return 1 + (amount - 1) * CGFloat(eased)
+        } else {
+            return amount
+        }
     }
 
     private func applyZoomRamps(
@@ -475,38 +528,67 @@ final class EditorModel: ObservableObject {
         duration: Double
     ) {
         let transitionDuration = 0.35
+        let sampleInterval = 1.0 / 30.0
+
         for range in zoomRanges.sorted(by: { $0.start < $1.start }) {
             let start = min(duration, max(0, range.start))
             let end = min(duration, max(start, range.end))
             guard end > start else { continue }
 
             let transition = min(transitionDuration, (end - start) / 2)
-            let startTime = CMTime(seconds: start, preferredTimescale: 600)
-            let zoomInEnd = CMTime(seconds: start + transition, preferredTimescale: 600)
-            let zoomOutStart = CMTime(seconds: end - transition, preferredTimescale: 600)
-            let endTime = CMTime(seconds: end, preferredTimescale: 600)
-            let zoomTransform = baseTransform.concatenating(
-                centeredZoomTransform(renderSize: renderSize, amount: range.amount)
-            )
+            var previousTime = start
+            var previousTransform = baseTransform
 
-            applyTransformAnimation(
-                to: layerInstruction,
-                from: baseTransform,
-                to: zoomTransform,
-                start: startTime,
-                end: zoomInEnd,
-                animation: range.entryAnimation
+            var sampleTime = start + sampleInterval
+            while sampleTime < end {
+                let currentTransform = transformForZoom(
+                    at: previousTime,
+                    range: range,
+                    transition: transition,
+                    baseTransform: baseTransform,
+                    renderSize: renderSize
+                )
+                let startTime = CMTime(seconds: previousTime, preferredTimescale: 600)
+                let endTime = CMTime(seconds: sampleTime, preferredTimescale: 600)
+                layerInstruction.setTransformRamp(
+                    fromStart: previousTransform,
+                    toEnd: currentTransform,
+                    timeRange: CMTimeRange(start: startTime, end: endTime)
+                )
+
+                previousTransform = currentTransform
+                previousTime = sampleTime
+                sampleTime += sampleInterval
+            }
+
+            let finalTransform = transformForZoom(
+                at: previousTime,
+                range: range,
+                transition: transition,
+                baseTransform: baseTransform,
+                renderSize: renderSize
             )
-            layerInstruction.setTransform(zoomTransform, at: zoomInEnd)
-            applyTransformAnimation(
-                to: layerInstruction,
-                from: zoomTransform,
-                to: baseTransform,
-                start: zoomOutStart,
-                end: endTime,
-                animation: range.exitAnimation
+            let startTime = CMTime(seconds: previousTime, preferredTimescale: 600)
+            let endTime = CMTime(seconds: end, preferredTimescale: 600)
+            layerInstruction.setTransformRamp(
+                fromStart: previousTransform,
+                toEnd: finalTransform,
+                timeRange: CMTimeRange(start: startTime, end: endTime)
             )
         }
+    }
+
+    private func transformForZoom(
+        at time: Double,
+        range: ZoomRange,
+        transition: Double,
+        baseTransform: CGAffineTransform,
+        renderSize: CGSize
+    ) -> CGAffineTransform {
+        let scale = zoomScale(at: time, range: range, transition: transition)
+        let center = cursorPosition(at: time)
+        let zoom = zoomTransform(renderSize: renderSize, scale: scale, center: center)
+        return baseTransform.concatenating(zoom)
     }
 
     private func applyTransformAnimation(

@@ -23,6 +23,12 @@ struct DisplayInfo: Identifiable, Equatable {
     var idValue: UInt32 { id }
 }
 
+struct CursorPosition: Codable, Equatable {
+    let time: TimeInterval
+    let x: Double
+    let y: Double
+}
+
 @MainActor
 final class RecordingController: NSObject, ObservableObject {
     enum State: Equatable {
@@ -48,6 +54,9 @@ final class RecordingController: NSObject, ObservableObject {
     private var outputURL: URL?
     private var startedAt: Date?
     private var timer: Timer?
+    private var cursorTimer: Timer?
+    private var cursorTrack: [CursorPosition] = []
+    private var recordedDisplayID: CGDirectDisplayID?
 
     var isRecording: Bool {
         switch state {
@@ -127,6 +136,7 @@ final class RecordingController: NSObject, ObservableObject {
         } else {
             display = displays[0]
         }
+        recordedDisplayID = display.displayID
 
         let outputURL = try makeOutputURL()
         let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -190,22 +200,26 @@ final class RecordingController: NSObject, ObservableObject {
         state = .recording
         startedAt = .now
         startTimer()
+        startCursorTracking()
     }
 
     private func recordingDidFinish() {
         stopTimer()
+        stopCursorTracking()
         guard let outputURL else {
             state = .failed("The recording finished without creating a video file.")
             resetCaptureReferences()
             return
         }
 
+        saveCursorTrack(for: outputURL)
         resetCaptureReferences(keepingOutputURL: true)
         state = .finished(outputURL)
     }
 
     private func finishWithError(_ error: Error) {
         stopTimer()
+        stopCursorTracking()
         resetCaptureReferences()
         state = .failed(error.localizedDescription)
     }
@@ -225,11 +239,51 @@ final class RecordingController: NSObject, ObservableObject {
         timer = nil
     }
 
+    private func startCursorTracking() {
+        stopCursorTracking()
+        cursorTrack = []
+        guard let recordedDisplayID else { return }
+        let bounds = CGDisplayBounds(recordedDisplayID)
+
+        cursorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let startedAt = self.startedAt else { return }
+                let location = NSEvent.mouseLocation
+                let relativeX = (location.x - bounds.origin.x) / bounds.width
+                let relativeY = (location.y - bounds.origin.y) / bounds.height
+                let position = CursorPosition(
+                    time: Date().timeIntervalSince(startedAt),
+                    x: max(0, min(1, relativeX)),
+                    y: max(0, min(1, relativeY))
+                )
+                self.cursorTrack.append(position)
+            }
+        }
+    }
+
+    private func stopCursorTracking() {
+        cursorTimer?.invalidate()
+        cursorTimer = nil
+    }
+
+    private func saveCursorTrack(for videoURL: URL) {
+        guard !cursorTrack.isEmpty else { return }
+        let trackURL = videoURL.deletingPathExtension().appendingPathExtension("cursor.json")
+        do {
+            let data = try JSONEncoder().encode(cursorTrack)
+            try data.write(to: trackURL)
+        } catch {
+            print("Failed to save cursor track: \(error)")
+        }
+    }
+
     private func resetCaptureReferences(keepingOutputURL: Bool = false) {
         stream = nil
         recordingOutput = nil
         startedAt = nil
         elapsed = 0
+        cursorTrack = []
+        recordedDisplayID = nil
         if !keepingOutputURL {
             outputURL = nil
         }
