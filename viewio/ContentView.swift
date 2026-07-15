@@ -370,12 +370,28 @@ private struct EditorHeader: View {
     }
 }
 
+private struct PlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let playerView = AVPlayerView()
+        playerView.player = player
+        playerView.controlsStyle = .none
+        playerView.videoGravity = .resizeAspect
+        return playerView
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        nsView.player = player
+    }
+}
+
 private struct VideoPreview: View {
     @ObservedObject var model: EditorModel
 
     var body: some View {
         VStack(spacing: 0) {
-            VideoPlayer(player: model.player)
+            PlayerView(player: model.player)
                 .background(Color.black)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
