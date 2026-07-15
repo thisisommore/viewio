@@ -268,74 +268,31 @@ private struct RecordingProgressView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            RecordingBar(
-                title: isStopping ? "Finishing recording…" : "Recording",
-                detail: isStopping ? "Saving your video" : formattedDuration(elapsed),
-                actionTitle: isStopping ? "Stopping" : "Stop",
-                actionIcon: isStopping ? "hourglass" : "stop.fill",
-                action: onStop,
-                isWorking: isStopping,
-                isDestructive: true
-            )
-
             Spacer()
 
-            VStack(spacing: 16) {
+            VStack(spacing: 18) {
                 Image(systemName: "record.circle.fill")
-                    .font(.system(size: 58))
+                    .font(.system(size: 32))
                     .foregroundStyle(.red)
                     .symbolEffect(.pulse, options: .repeating, isActive: !isStopping)
 
-                Text(isStopping ? "Finishing your recording" : "Recording your screen")
-                    .font(.system(size: 25, weight: .semibold))
-                Text(isStopping ? "The editing workspace will open when the file is ready." : "Use the red recording icon in your menu bar to stop from anywhere.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 430)
-            }
-
-            Spacer()
-        }
-    }
-}
-
-private struct RecordingBar: View {
-    let title: String
-    let detail: String
-    let actionTitle: String
-    let actionIcon: String
-    let action: () -> Void
-    var isWorking = false
-    var isDestructive = false
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: isDestructive ? "record.circle.fill" : "video.badge.plus")
-                .foregroundStyle(isDestructive ? Color.red : Color.accentColor)
-                .font(.title3)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(spacing: 6) {
+                    Text(isStopping ? "Finishing recording…" : "Recording your screen")
+                        .font(.system(size: 22, weight: .semibold))
+                    Text(isStopping ? "Saving your video" : formattedDuration(elapsed))
+                        .font(.system(size: 15, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
 
-            Button(action: action) {
-                Label(actionTitle, systemImage: actionIcon)
+            Button(action: onStop) {
+                Text(isStopping ? "Stopping…" : "Stop Recording")
+                    .font(.system(size: 16, weight: .semibold))
             }
-            .buttonStyle(.borderedProminent)
-            .tint(isDestructive ? .red : .accentColor)
-            .disabled(isWorking)
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(.bar)
-        .overlay(alignment: .bottom) {
-            Divider()
+            .buttonStyle(RecordButtonStyle(isDisabled: isStopping))
+            .disabled(isStopping)
         }
     }
 }
