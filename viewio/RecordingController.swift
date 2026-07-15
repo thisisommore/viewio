@@ -3,6 +3,7 @@
 //  viewio
 //
 
+import AppKit
 import AVFoundation
 import Combine
 import Foundation
@@ -12,6 +13,14 @@ struct AudioDevice: Identifiable, Equatable {
     let id: String
     let name: String
     let isDefault: Bool
+}
+
+struct DisplayInfo: Identifiable, Equatable {
+    let id: CGDirectDisplayID
+    let name: String
+    let size: CGSize
+
+    var idValue: UInt32 { id }
 }
 
 @MainActor
@@ -31,6 +40,8 @@ final class RecordingController: NSObject, ObservableObject {
     @Published var captureMicrophone = false
     @Published var selectedMicrophoneID: String?
     @Published private(set) var availableMicrophones: [AudioDevice] = []
+    @Published var selectedDisplayID: CGDirectDisplayID?
+    @Published private(set) var availableDisplays: [DisplayInfo] = []
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -49,6 +60,7 @@ final class RecordingController: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        discoverDisplays()
         discoverMicrophones()
     }
 
@@ -103,8 +115,17 @@ final class RecordingController: NSObject, ObservableObject {
 
     private func configureAndStartCapture() async throws {
         let content = try await SCShareableContent.current
-        guard let display = content.displays.first else {
+        let displays = content.displays
+        guard !displays.isEmpty else {
             throw RecordingError.noDisplay
+        }
+
+        let display: SCDisplay
+        if let selectedDisplayID,
+           let selected = displays.first(where: { $0.displayID == selectedDisplayID }) {
+            display = selected
+        } else {
+            display = displays[0]
         }
 
         let outputURL = try makeOutputURL()
@@ -227,6 +248,24 @@ final class RecordingController: NSObject, ObservableObject {
                 name: device.localizedName,
                 isDefault: device.uniqueID == defaultDevice?.uniqueID
             )
+        }
+    }
+
+    private func discoverDisplays() {
+        availableDisplays = NSScreen.screens.map { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            let displayID = number.uint32Value
+            return DisplayInfo(
+                id: displayID,
+                name: screen.localizedName,
+                size: screen.frame.size
+            )
+        }.compactMap { $0 }
+
+        if selectedDisplayID == nil, let first = availableDisplays.first {
+            selectedDisplayID = first.id
         }
     }
 

@@ -73,7 +73,7 @@ private struct RecordingStartView: View {
         VStack(spacing: 0) {
             RecordingBar(
                 title: "New recording",
-                detail: "Capture your primary display",
+                detail: "Capture your selected display",
                 actionTitle: "Record",
                 actionIcon: "record.circle.fill",
                 action: onRecord,
@@ -96,6 +96,8 @@ private struct RecordingStartView: View {
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 460)
                 }
+
+                DisplayOptionsView(recorder: recorder, isPreparing: isPreparing)
 
                 AudioOptionsView(recorder: recorder, isPreparing: isPreparing)
 
@@ -138,6 +140,30 @@ private struct RecordingStartView: View {
 
             Spacer()
         }
+    }
+}
+
+private struct DisplayOptionsView: View {
+    @ObservedObject var recorder: RecordingController
+    let isPreparing: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Display")
+                .font(.system(size: 13, weight: .semibold))
+
+            Picker("Display", selection: $recorder.selectedDisplayID) {
+                ForEach(recorder.availableDisplays) { display in
+                    Text(display.name).tag(display.id as CGDirectDisplayID?)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .disabled(isPreparing || recorder.availableDisplays.isEmpty)
+        }
+        .frame(maxWidth: 280, alignment: .leading)
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
