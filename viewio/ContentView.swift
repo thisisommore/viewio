@@ -71,75 +71,82 @@ private struct RecordingStartView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            RecordingBar(
-                title: "New recording",
-                detail: "Capture your selected display",
-                actionTitle: "Record",
-                actionIcon: "record.circle.fill",
-                action: onRecord,
-                isWorking: isPreparing
-            )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 32) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("New Recording")
+                            .font(.system(size: 26, weight: .bold))
+                        Text("Choose a display and audio sources, then start recording.")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                    }
 
-            Spacer()
+                    DisplayOptionsView(recorder: recorder, isPreparing: isPreparing)
 
-            VStack(spacing: 18) {
-                Image(systemName: "record.circle")
-                    .font(.system(size: 58, weight: .light))
-                    .foregroundStyle(.red)
-
-                VStack(spacing: 7) {
-                    Text("Ready when you are")
-                        .font(.system(size: 25, weight: .semibold))
-                    Text("Record your screen, then trim, zoom, adjust clip speed, and export a finished video.")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 460)
+                    AudioOptionsView(recorder: recorder, isPreparing: isPreparing)
                 }
+                .padding(32)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
-                DisplayOptionsView(recorder: recorder, isPreparing: isPreparing)
+            Divider()
 
-                AudioOptionsView(recorder: recorder, isPreparing: isPreparing)
+            VStack(spacing: 16) {
+                if let errorMessage {
+                    errorBanner(message: errorMessage)
+                }
 
                 Button(action: onRecord) {
-                    Label("Start recording", systemImage: "record.circle.fill")
-                        .frame(minWidth: 164)
+                    Text("Start Recording")
+                        .font(.system(size: 16, weight: .semibold))
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .controlSize(.large)
+                .buttonStyle(RecordButtonStyle(isDisabled: isPreparing))
                 .disabled(isPreparing)
-
-                Text("Screen Recording permission is requested by macOS the first time you record.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
             }
-
-            if let errorMessage {
-                HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(errorMessage)
-                        .lineLimit(2)
-                    Spacer()
-                    Button("Open Settings") {
-                        if let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                            NSWorkspace.shared.open(settingsURL)
-                        }
-                    }
-                    Button("Dismiss") {
-                        onDismissError?()
-                    }
-                }
-                .font(.callout)
-                .padding(14)
-                .frame(maxWidth: 600)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .padding(.top, 28)
-            }
-
-            Spacer()
+            .padding(24)
+            .background(.bar)
         }
+    }
+
+    private func errorBanner(message: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(.secondary)
+            Text(message)
+                .lineLimit(2)
+            Spacer()
+            Button("Open Settings") {
+                if let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                    NSWorkspace.shared.open(settingsURL)
+                }
+            }
+            Button("Dismiss") {
+                onDismissError?()
+            }
+        }
+        .font(.callout)
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.primary.opacity(0.15))
+        }
+    }
+}
+
+private struct RecordButtonStyle: ButtonStyle {
+    let isDisabled: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+            .background {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(isDisabled ? Color.primary.opacity(0.35) : Color.primary.opacity(configuration.isPressed ? 0.85 : 1))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -148,22 +155,25 @@ private struct DisplayOptionsView: View {
     let isPreparing: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Display")
-                .font(.system(size: 13, weight: .semibold))
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("Display")
 
-            Picker("Display", selection: $recorder.selectedDisplayID) {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 120, maximum: 180), spacing: 12)],
+                alignment: .leading,
+                spacing: 12
+            ) {
                 ForEach(recorder.availableDisplays) { display in
-                    Text(display.name).tag(display.id as CGDirectDisplayID?)
+                    SelectionCard(
+                        title: display.name,
+                        isSelected: recorder.selectedDisplayID == display.id,
+                        isDisabled: isPreparing
+                    ) {
+                        recorder.selectedDisplayID = display.id
+                    }
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .disabled(isPreparing || recorder.availableDisplays.isEmpty)
         }
-        .frame(maxWidth: 280, alignment: .leading)
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -172,36 +182,88 @@ private struct AudioOptionsView: View {
     let isPreparing: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Audio")
-                .font(.system(size: 13, weight: .semibold))
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("Audio")
 
-            Toggle("System audio", isOn: $recorder.captureSystemAudio)
-                .disabled(isPreparing)
+            HStack(alignment: .top, spacing: 12) {
+                SelectionCard(
+                    title: "System",
+                    isSelected: recorder.captureSystemAudio,
+                    isDisabled: isPreparing
+                ) {
+                    recorder.captureSystemAudio.toggle()
+                }
+                .frame(width: 116)
 
-            Toggle("Microphone", isOn: $recorder.captureMicrophone)
-                .disabled(isPreparing)
+                if !recorder.availableMicrophones.isEmpty {
+                    Divider()
+                        .frame(width: 1)
+                        .background(Color.primary.opacity(0.15))
 
-            if recorder.captureMicrophone {
-                Picker("Microphone device", selection: $recorder.selectedMicrophoneID) {
-                    Text("System Default").tag(String?.none)
                     ForEach(recorder.availableMicrophones) { device in
-                        Text(device.name).tag(device.id as String?)
+                        let isSelected = recorder.captureMicrophone && recorder.selectedMicrophoneID == device.id
+                        SelectionCard(
+                            title: device.name,
+                            isSelected: isSelected,
+                            isDisabled: isPreparing
+                        ) {
+                            if isSelected {
+                                recorder.captureMicrophone = false
+                                recorder.selectedMicrophoneID = nil
+                            } else {
+                                recorder.captureMicrophone = true
+                                recorder.selectedMicrophoneID = device.id
+                            }
+                        }
+                        .frame(width: 116)
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .disabled(isPreparing || recorder.availableMicrophones.isEmpty)
-
-                Text("Microphone access is requested by macOS the first time you enable it.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
             }
         }
-        .frame(maxWidth: 280, alignment: .leading)
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
+}
+
+private struct SelectionCard: View {
+    let title: String
+    let isSelected: Bool
+    let isDisabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                .padding(.horizontal, 12)
+        }
+        .buttonStyle(SelectionCardStyle(isSelected: isSelected))
+        .disabled(isDisabled)
+        .aspectRatio(1.25, contentMode: .fit)
+    }
+}
+
+private struct SelectionCardStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.primary)
+            .background {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.primary.opacity(configuration.isPressed ? 0.1 : 0.05))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.primary.opacity(isSelected ? 0.6 : 0.1), lineWidth: isSelected ? 2 : 1)
+            }
+    }
+}
+
+private func sectionTitle(_ title: String) -> some View {
+    Text(title)
+        .font(.system(size: 14, weight: .semibold))
 }
 
 private struct RecordingProgressView: View {
