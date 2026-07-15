@@ -35,11 +35,59 @@ struct ZoomRange: Identifiable, Equatable {
     let id: UUID
     var start: Double
     var end: Double
+    var amount: Double
+    var entryAnimation: ZoomAnimation
+    var exitAnimation: ZoomAnimation
 
-    init(id: UUID = UUID(), start: Double, end: Double) {
+    init(
+        id: UUID = UUID(),
+        start: Double,
+        end: Double,
+        amount: Double = 1.24,
+        entryAnimation: ZoomAnimation = .smooth,
+        exitAnimation: ZoomAnimation = .smooth
+    ) {
         self.id = id
         self.start = start
         self.end = end
+        self.amount = amount
+        self.entryAnimation = entryAnimation
+        self.exitAnimation = exitAnimation
+    }
+}
+
+enum ZoomAnimation: String, CaseIterable, Identifiable {
+    case none
+    case linear
+    case easeIn
+    case easeOut
+    case smooth
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .none: "Instant"
+        case .linear: "Linear"
+        case .easeIn: "Ease in"
+        case .easeOut: "Ease out"
+        case .smooth: "Smooth"
+        }
+    }
+}
+
+private extension ZoomAnimation {
+    func progress(at value: Double) -> Double {
+        switch self {
+        case .none, .linear:
+            value
+        case .easeIn:
+            value * value
+        case .easeOut:
+            1 - (1 - value) * (1 - value)
+        case .smooth:
+            value * value * (3 - 2 * value)
+        }
     }
 }
 
@@ -77,6 +125,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var clips: [EditClip] = []
     @Published private(set) var zoomRanges: [ZoomRange] = []
     @Published var selectedClipID: UUID?
+    @Published var selectedZoomID: UUID?
     @Published var isPlaying = false
 
     private var sourceAsset: AVURLAsset?
@@ -117,6 +166,11 @@ final class EditorModel: ObservableObject {
     var selectedClip: EditClip? {
         guard let selectedClipID else { return nil }
         return clips.first { $0.id == selectedClipID }
+    }
+
+    var selectedZoomRange: ZoomRange? {
+        guard let selectedZoomID else { return nil }
+        return zoomRanges.first { $0.id == selectedZoomID }
     }
 
     var clipTitle: String {
@@ -182,6 +236,12 @@ final class EditorModel: ObservableObject {
 
     func selectClip(_ id: UUID) {
         selectedClipID = id
+        selectedZoomID = nil
+    }
+
+    func selectZoom(_ id: UUID) {
+        selectedZoomID = id
+        selectedClipID = nil
     }
 
     func setSpeed(_ speed: Double, for clipID: UUID) {
@@ -194,19 +254,43 @@ final class EditorModel: ObservableObject {
         let start = min(max(0, playhead), max(0, duration - 1.5))
         let end = min(duration, start + min(2, max(0.5, duration)))
         zoomRanges.append(ZoomRange(start: start, end: end))
+        selectedZoomID = zoomRanges.last?.id
         rebuildPreview(preservingPlayhead: true)
     }
 
     func updateZoomRange(_ range: ZoomRange) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == range.id }) else { return }
         let minimumLength = min(0.25, max(0.05, duration))
-        zoomRanges[index].start = min(max(0, range.start), max(0, duration - minimumLength))
-        zoomRanges[index].end = min(duration, max(zoomRanges[index].start + minimumLength, range.end))
+        var updated = zoomRanges[index]
+        updated.start = min(max(0, range.start), max(0, duration - minimumLength))
+        updated.end = min(duration, max(updated.start + minimumLength, range.end))
+        zoomRanges[index] = updated
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setZoomAmount(_ amount: Double, for id: UUID) {
+        guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
+        zoomRanges[index].amount = min(3, max(1, amount))
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setZoomEntryAnimation(_ animation: ZoomAnimation, for id: UUID) {
+        guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
+        zoomRanges[index].entryAnimation = animation
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setZoomExitAnimation(_ animation: ZoomAnimation, for id: UUID) {
+        guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
+        zoomRanges[index].exitAnimation = animation
         rebuildPreview(preservingPlayhead: true)
     }
 
     func removeZoomRange(id: UUID) {
         zoomRanges.removeAll { $0.id == id }
+        if selectedZoomID == id {
+            selectedZoomID = nil
+        }
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -363,11 +447,10 @@ final class EditorModel: ObservableObject {
         let baseTransform = sourceTrack.preferredTransform
         layerInstruction.setTransform(baseTransform, at: .zero)
 
-        let zoomTransform = baseTransform.concatenating(centeredZoomTransform(renderSize: renderSize))
         applyZoomRamps(
             to: layerInstruction,
             baseTransform: baseTransform,
-            zoomTransform: zoomTransform,
+            renderSize: renderSize,
             duration: duration.seconds
         )
 
@@ -376,8 +459,8 @@ final class EditorModel: ObservableObject {
         return videoComposition
     }
 
-    private func centeredZoomTransform(renderSize: CGSize) -> CGAffineTransform {
-        let scale: CGFloat = 1.24
+    private func centeredZoomTransform(renderSize: CGSize, amount: Double) -> CGAffineTransform {
+        let scale = CGFloat(min(3, max(1, amount)))
         return CGAffineTransform(
             translationX: renderSize.width * (1 - scale) / 2,
             y: renderSize.height * (1 - scale) / 2
@@ -388,7 +471,7 @@ final class EditorModel: ObservableObject {
     private func applyZoomRamps(
         to layerInstruction: AVMutableVideoCompositionLayerInstruction,
         baseTransform: CGAffineTransform,
-        zoomTransform: CGAffineTransform,
+        renderSize: CGSize,
         duration: Double
     ) {
         let transitionDuration = 0.35
@@ -402,23 +485,76 @@ final class EditorModel: ObservableObject {
             let zoomInEnd = CMTime(seconds: start + transition, preferredTimescale: 600)
             let zoomOutStart = CMTime(seconds: end - transition, preferredTimescale: 600)
             let endTime = CMTime(seconds: end, preferredTimescale: 600)
+            let zoomTransform = baseTransform.concatenating(
+                centeredZoomTransform(renderSize: renderSize, amount: range.amount)
+            )
 
-            if transition > 0.01 {
-                layerInstruction.setTransformRamp(
-                    fromStart: baseTransform,
-                    toEnd: zoomTransform,
-                    timeRange: CMTimeRange(start: startTime, end: zoomInEnd)
-                )
-                layerInstruction.setTransformRamp(
-                    fromStart: zoomTransform,
-                    toEnd: baseTransform,
-                    timeRange: CMTimeRange(start: zoomOutStart, end: endTime)
-                )
-            } else {
-                layerInstruction.setTransform(zoomTransform, at: startTime)
-                layerInstruction.setTransform(baseTransform, at: endTime)
-            }
+            applyTransformAnimation(
+                to: layerInstruction,
+                from: baseTransform,
+                to: zoomTransform,
+                start: startTime,
+                end: zoomInEnd,
+                animation: range.entryAnimation
+            )
+            layerInstruction.setTransform(zoomTransform, at: zoomInEnd)
+            applyTransformAnimation(
+                to: layerInstruction,
+                from: zoomTransform,
+                to: baseTransform,
+                start: zoomOutStart,
+                end: endTime,
+                animation: range.exitAnimation
+            )
         }
+    }
+
+    private func applyTransformAnimation(
+        to layerInstruction: AVMutableVideoCompositionLayerInstruction,
+        from startTransform: CGAffineTransform,
+        to endTransform: CGAffineTransform,
+        start: CMTime,
+        end: CMTime,
+        animation: ZoomAnimation
+    ) {
+        guard end > start else { return }
+        if animation == .none {
+            layerInstruction.setTransform(endTransform, at: start)
+            return
+        }
+
+        let steps = animation == .linear ? 1 : 12
+        let duration = end.seconds - start.seconds
+        for step in 0..<steps {
+            let lower = Double(step) / Double(steps)
+            let upper = Double(step + 1) / Double(steps)
+            let lowerProgress = animation.progress(at: lower)
+            let upperProgress = animation.progress(at: upper)
+            let firstTime = CMTime(seconds: start.seconds + duration * lower, preferredTimescale: 600)
+            let secondTime = CMTime(seconds: start.seconds + duration * upper, preferredTimescale: 600)
+
+            layerInstruction.setTransformRamp(
+                fromStart: interpolate(startTransform, endTransform, progress: lowerProgress),
+                toEnd: interpolate(startTransform, endTransform, progress: upperProgress),
+                timeRange: CMTimeRange(start: firstTime, end: secondTime)
+            )
+        }
+    }
+
+    private func interpolate(
+        _ start: CGAffineTransform,
+        _ end: CGAffineTransform,
+        progress: Double
+    ) -> CGAffineTransform {
+        let value = CGFloat(progress)
+        return CGAffineTransform(
+            a: start.a + (end.a - start.a) * value,
+            b: start.b + (end.b - start.b) * value,
+            c: start.c + (end.c - start.c) * value,
+            d: start.d + (end.d - start.d) * value,
+            tx: start.tx + (end.tx - start.tx) * value,
+            ty: start.ty + (end.ty - start.ty) * value
+        )
     }
 
     private func startExport(to outputURL: URL) {

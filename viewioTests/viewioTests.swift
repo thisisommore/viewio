@@ -46,6 +46,13 @@ final class viewioTests: XCTestCase {
         model.playhead = 0.2
         model.addZoomRange()
         XCTAssertEqual(model.zoomRanges.count, 1)
+        let zoomID = try XCTUnwrap(model.zoomRanges.first?.id)
+        model.setZoomAmount(1.8, for: zoomID)
+        model.setZoomEntryAnimation(.easeIn, for: zoomID)
+        model.setZoomExitAnimation(.easeOut, for: zoomID)
+        XCTAssertEqual(model.selectedZoomRange?.amount, 1.8)
+        XCTAssertEqual(model.selectedZoomRange?.entryAnimation, .easeIn)
+        XCTAssertEqual(model.selectedZoomRange?.exitAnimation, .easeOut)
 
         model.export(to: exportURL)
         try await waitUntil(timeout: 20) {

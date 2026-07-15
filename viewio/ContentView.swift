@@ -392,43 +392,14 @@ private struct ClipInspector: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("CLIP INSPECTOR")
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(0.75)
-                    .foregroundStyle(.secondary)
-
-                Text(model.selectedClip == nil ? "Select a clip" : "Playback speed")
-                    .font(.system(size: 14, weight: .semibold))
-            }
-
-            if let selectedClip = model.selectedClip {
-                Text(speedLabel(selectedClip.speed))
-                    .font(.system(size: 30, weight: .medium, design: .rounded))
-                    .contentTransition(.numericText())
-
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 2),
-                    spacing: 6
-                ) {
-                    ForEach(speeds, id: \.self) { speed in
-                        Button(speedLabel(speed)) {
-                            model.setSpeed(speed, for: selectedClip.id)
-                        }
-                        .buttonStyle(SpeedChipStyle(isSelected: abs(speed - selectedClip.speed) < 0.01))
-                    }
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Label("Clip duration", systemImage: "clock")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(formattedDuration(selectedClip.outputDuration))
-                        .font(.system(size: 12, design: .monospaced))
-                }
+            if let range = model.selectedZoomRange {
+                zoomHeader(range: range)
+                zoomControls(for: range)
+            } else if let selectedClip = model.selectedClip {
+                inspectorHeader(title: "CLIP INSPECTOR", subtitle: "Playback speed")
+                clipControls(for: selectedClip)
             } else {
+                inspectorHeader(title: "CLIP INSPECTOR", subtitle: "Select a clip")
                 Text("Click a segment in the V1 lane to adjust it independently.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -442,6 +413,106 @@ private struct ClipInspector: View {
         .overlay(alignment: .leading) {
             Divider()
         }
+    }
+
+    @ViewBuilder
+    private func inspectorHeader(title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(0.75)
+                .foregroundStyle(.secondary)
+            Text(subtitle)
+                .font(.system(size: 14, weight: .semibold))
+        }
+    }
+
+    @ViewBuilder
+    private func zoomHeader(range: ZoomRange) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("ZOOM")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.75)
+                    .foregroundStyle(.secondary)
+                Text("Zoom range")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            Spacer()
+            Button {
+                model.removeZoomRange(id: range.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func clipControls(for selectedClip: EditClip) -> some View {
+        Text(speedLabel(selectedClip.speed))
+            .font(.system(size: 30, weight: .medium, design: .rounded))
+            .contentTransition(.numericText())
+
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 2),
+            spacing: 6
+        ) {
+            ForEach(speeds, id: \.self) { speed in
+                Button(speedLabel(speed)) {
+                    model.setSpeed(speed, for: selectedClip.id)
+                }
+                .buttonStyle(SpeedChipStyle(isSelected: abs(speed - selectedClip.speed) < 0.01))
+            }
+        }
+
+        Divider()
+
+        VStack(alignment: .leading, spacing: 5) {
+            Label("Clip duration", systemImage: "clock")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(formattedDuration(selectedClip.outputDuration))
+                .font(.system(size: 12, design: .monospaced))
+        }
+    }
+
+    @ViewBuilder
+    private func zoomControls(for range: ZoomRange) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(String(format: "%.2gx", range.amount))
+                .font(.system(size: 26, weight: .medium, design: .rounded))
+            Spacer()
+            Text("amount")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        Slider(
+            value: Binding(
+                get: { range.amount },
+                set: { model.setZoomAmount($0, for: range.id) }
+            ),
+            in: 1...3,
+            step: 0.05
+        )
+        .tint(.accentColor)
+
+        Divider()
+
+        ZoomAnimationPicker(
+            title: "Entry",
+            selection: range.entryAnimation,
+            onChange: { model.setZoomEntryAnimation($0, for: range.id) }
+        )
+
+        ZoomAnimationPicker(
+            title: "Exit",
+            selection: range.exitAnimation,
+            onChange: { model.setZoomExitAnimation($0, for: range.id) }
+        )
     }
 }
 
@@ -458,6 +529,33 @@ private struct SpeedChipStyle: ButtonStyle {
                     .fill(isSelected ? Color.accentColor : Color.primary.opacity(configuration.isPressed ? 0.12 : 0.07))
             }
             .foregroundStyle(isSelected ? .white : .primary)
+    }
+}
+
+private struct ZoomAnimationPicker: View {
+    let title: String
+    let selection: ZoomAnimation
+    let onChange: (ZoomAnimation) -> Void
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Picker(title, selection: Binding(
+                get: { selection },
+                set: onChange
+            )) {
+                ForEach(ZoomAnimation.allCases) { animation in
+                    Text(animation.title)
+                        .tag(animation)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 112, alignment: .trailing)
+        }
     }
 }
 
@@ -661,6 +759,8 @@ private struct ZoomLane: View {
                                 duration: duration,
                                 trackWidth: trackWidth,
                                 onChange: model.updateZoomRange,
+                                onSelect: { model.selectZoom(range.id) },
+                                isSelected: model.selectedZoomID == range.id,
                                 onRemove: { model.removeZoomRange(id: range.id) }
                             )
                         }
@@ -686,6 +786,8 @@ private struct ZoomRangeBlock: View {
     let duration: Double
     let trackWidth: CGFloat
     let onChange: (ZoomRange) -> Void
+    let onSelect: () -> Void
+    let isSelected: Bool
     let onRemove: () -> Void
 
     @State private var moveStart: ZoomRange?
@@ -704,7 +806,13 @@ private struct ZoomRangeBlock: View {
             .fill(Color.accentColor.opacity(0.20))
             .overlay {
                 RoundedRectangle(cornerRadius: 5)
-                    .stroke(Color.accentColor, lineWidth: 1.25)
+                    .stroke(isSelected ? Color.accentColor : Color.accentColor.opacity(0.65), lineWidth: isSelected ? 2 : 1.25)
+            }
+            .overlay(alignment: .center) {
+                Text(String(format: "%.2gx", range.amount))
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.accentColor)
+                    .opacity(width > 46 ? 1 : 0)
             }
             .frame(width: width, height: 34)
             .overlay(alignment: .leading) {
@@ -728,6 +836,7 @@ private struct ZoomRangeBlock: View {
             }
             .offset(x: x)
             .gesture(moveGesture)
+            .onTapGesture(perform: onSelect)
             .help("Drag to move the zoom range. Drag its edges to resize.")
     }
 
