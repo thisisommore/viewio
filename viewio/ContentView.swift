@@ -136,7 +136,7 @@ private struct RecordButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44)
+            .frame(maxWidth: .infinity, minHeight: 88, maxHeight: 88)
             .background {
                 Rectangle()
                     .fill(isDisabled ? Color.red.opacity(0.4) : Color.red.opacity(configuration.isPressed ? 0.85 : 1))
