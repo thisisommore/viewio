@@ -2,389 +2,434 @@
 //  ContentView.swift
 //  viewio
 //
-//  Created by Om More on 12/07/26.
-//
 
+import AppKit
+import AVKit
 import SwiftUI
 
 struct ContentView: View {
-    @State private var isPlaying = false
-    @State private var playhead: Double = 4.0
-    @State private var hasMockVideo = true
-    @State private var zoomRanges: [ZoomRange] = [ZoomRange(start: 2, end: 4)]
-    @State private var cuts: [Double] = []
-    @State private var segmentSpeeds: [Double] = [1.0]
-    @State private var selectedSegment = 0
+    @EnvironmentObject private var recorder: RecordingController
 
     var body: some View {
-        VStack(spacing: 0) {
-            PreviewWorkspace(
-                isPlaying: $isPlaying,
-                hasVideo: hasMockVideo,
-                zoomRanges: zoomRanges,
-                playhead: playhead,
-                onCut: cutAtPlayhead,
-                selectedSpeed: selectedSpeed,
-                hasSpeedSelection: !segmentSpeeds.isEmpty,
-                onSpeedChange: updateSelectedSpeed
-            )
+        Group {
+            switch recorder.state {
+            case .idle:
+                RecordingStartView(
+                    isPreparing: false,
+                    onRecord: recorder.startRecording
+                )
 
-            Divider()
+            case .preparing:
+                RecordingProgressView(
+                    elapsed: recorder.elapsed,
+                    isStopping: false,
+                    onStop: recorder.stopRecording
+                )
 
-            Timeline(
-                playhead: $playhead,
-                cuts: $cuts,
-                speeds: $segmentSpeeds,
-                selectedSegment: $selectedSegment
-            )
-            .frame(height: 208)
+            case .recording:
+                RecordingProgressView(
+                    elapsed: recorder.elapsed,
+                    isStopping: false,
+                    onStop: recorder.stopRecording
+                )
 
-            Divider()
+            case .stopping:
+                RecordingProgressView(
+                    elapsed: recorder.elapsed,
+                    isStopping: true,
+                    onStop: {}
+                )
 
-            ZoomTimeline(ranges: $zoomRanges)
-                .frame(height: 118)
+            case let .finished(url):
+                EditorWorkspace(
+                    sourceURL: url,
+                    onNewRecording: recorder.discardRecording
+                )
+                .id(url)
+
+            case let .failed(message):
+                RecordingStartView(
+                    isPreparing: false,
+                    errorMessage: message,
+                    onRecord: recorder.startRecording,
+                    onDismissError: recorder.dismissError
+                )
+            }
         }
-        .frame(minWidth: 920, minHeight: 660)
+        .animation(.snappy(duration: 0.28), value: recorder.isRecording)
+        .frame(minWidth: 960, minHeight: 650)
         .background(Color(nsColor: .windowBackgroundColor))
-    }
-
-    private func cutAtPlayhead() {
-        guard playhead > 0.05, playhead < 11.95 else { return }
-        guard !cuts.contains(where: { abs($0 - playhead) < 0.05 }) else { return }
-        let cutIndex = cuts.firstIndex(where: { $0 > playhead }) ?? cuts.count
-        cuts.insert(playhead, at: cutIndex)
-        let segmentIndex = min(cutIndex + 1, segmentSpeeds.count)
-        segmentSpeeds.insert(1.0, at: segmentIndex)
-        selectedSegment = min(segmentIndex, segmentSpeeds.count - 1)
-    }
-
-    private var selectedSpeed: Double {
-        guard segmentSpeeds.indices.contains(selectedSegment) else { return 1.0 }
-        return segmentSpeeds[selectedSegment]
-    }
-
-    private func updateSelectedSpeed(_ speed: Double) {
-        guard segmentSpeeds.indices.contains(selectedSegment) else { return }
-        segmentSpeeds[selectedSegment] = speed
     }
 }
 
-private struct PreviewWorkspace: View {
-    @Binding var isPlaying: Bool
-    let hasVideo: Bool
-    let zoomRanges: [ZoomRange]
-    let playhead: Double
-    let onCut: () -> Void
-    let selectedSpeed: Double
-    let hasSpeedSelection: Bool
-    let onSpeedChange: (Double) -> Void
+private struct RecordingStartView: View {
+    let isPreparing: Bool
+    var errorMessage: String?
+    let onRecord: () -> Void
+    var onDismissError: (() -> Void)?
 
     var body: some View {
-        GeometryReader { proxy in
-            HStack(alignment: .top, spacing: 28) {
-                if hasVideo {
-                    VideoPreview(isZoomed: zoomRanges.contains { $0.start...$0.end ~= playhead })
-                        .aspectRatio(16 / 9, contentMode: .fit)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                } else {
-                    ContentUnavailableView(
-                        "No video selected",
-                        systemImage: "film",
-                        description: Text("Import a video to begin editing."))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            RecordingBar(
+                title: "New recording",
+                detail: "Capture your primary display",
+                actionTitle: "Record",
+                actionIcon: "record.circle.fill",
+                action: onRecord,
+                isWorking: isPreparing
+            )
+
+            Spacer()
+
+            VStack(spacing: 18) {
+                Image(systemName: "record.circle")
+                    .font(.system(size: 58, weight: .light))
+                    .foregroundStyle(.red)
+
+                VStack(spacing: 7) {
+                    Text("Ready when you are")
+                        .font(.system(size: 25, weight: .semibold))
+                    Text("Record your screen, then trim, zoom, adjust clip speed, and export a finished video.")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 460)
                 }
 
-                VStack(alignment: .trailing, spacing: 16) {
-                    PlaybackControls(isPlaying: $isPlaying, onCut: onCut)
-
-                    SpeedInspector(
-                        speed: selectedSpeed,
-                        hasSelection: hasSpeedSelection,
-                        onChange: onSpeedChange
-                    )
-                    .frame(width: 180, height: 120)
+                Button(action: onRecord) {
+                    Label("Start recording", systemImage: "record.circle.fill")
+                        .frame(minWidth: 164)
                 }
-                .padding(.bottom, 4)
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.large)
+                .disabled(isPreparing)
+
+                Text("Screen Recording permission is requested by macOS the first time you record.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
-            .padding(.trailing, 26)
-            .padding(.bottom, 28)
+
+            if let errorMessage {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(errorMessage)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("Dismiss") {
+                        onDismissError?()
+                    }
+                }
+                .font(.callout)
+                .padding(14)
+                .frame(maxWidth: 600)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .padding(.top, 28)
+            }
+
+            Spacer()
+        }
+    }
+}
+
+private struct RecordingProgressView: View {
+    let elapsed: TimeInterval
+    let isStopping: Bool
+    let onStop: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            RecordingBar(
+                title: isStopping ? "Finishing recording…" : "Recording",
+                detail: isStopping ? "Saving your video" : formattedDuration(elapsed),
+                actionTitle: isStopping ? "Stopping" : "Stop",
+                actionIcon: isStopping ? "hourglass" : "stop.fill",
+                action: onStop,
+                isWorking: isStopping,
+                isDestructive: true
+            )
+
+            Spacer()
+
+            VStack(spacing: 16) {
+                Image(systemName: "record.circle.fill")
+                    .font(.system(size: 58))
+                    .foregroundStyle(.red)
+                    .symbolEffect(.pulse, options: .repeating, isActive: !isStopping)
+
+                Text(isStopping ? "Finishing your recording" : "Recording your screen")
+                    .font(.system(size: 25, weight: .semibold))
+                Text(isStopping ? "The editing workspace will open when the file is ready." : "Use the red recording icon in your menu bar to stop from anywhere.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 430)
+            }
+
+            Spacer()
+        }
+    }
+}
+
+private struct RecordingBar: View {
+    let title: String
+    let detail: String
+    let actionTitle: String
+    let actionIcon: String
+    let action: () -> Void
+    var isWorking = false
+    var isDestructive = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: isDestructive ? "record.circle.fill" : "video.badge.plus")
+                .foregroundStyle(isDestructive ? Color.red : Color.accentColor)
+                .font(.title3)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: action) {
+                Label(actionTitle, systemImage: actionIcon)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(isDestructive ? .red : .accentColor)
+            .disabled(isWorking)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.bar)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+    }
+}
+
+private struct EditorWorkspace: View {
+    @StateObject private var model: EditorModel
+    let onNewRecording: () -> Void
+
+    init(sourceURL: URL, onNewRecording: @escaping () -> Void) {
+        _model = StateObject(wrappedValue: EditorModel(sourceURL: sourceURL))
+        self.onNewRecording = onNewRecording
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            EditorHeader(
+                title: model.clipTitle,
+                isExporting: isExporting,
+                onNewRecording: onNewRecording,
+                onExport: model.export
+            )
+
+            switch model.loadState {
+            case .loading:
+                ProgressView("Preparing recording…")
+                    .controlSize(.regular)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            case let .failed(message):
+                ContentUnavailableView(
+                    "Couldn’t open recording",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(message)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            case .ready:
+                editor
+            }
+        }
+        .overlay {
+            ExportOverlay(state: model.exportState, dismiss: model.dismissExportMessage)
+        }
+    }
+
+    private var editor: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 0) {
+                VideoPreview(model: model)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                ClipInspector(model: model)
+                    .frame(width: 208)
+            }
+            .frame(minHeight: 330)
+
+            Divider()
+
+            TimelineView(model: model)
+                .frame(height: 148)
+
+            Divider()
+
+            ZoomLane(model: model)
+                .frame(height: 86)
+        }
+    }
+
+    private var isExporting: Bool {
+        if case .exporting = model.exportState {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+private struct EditorHeader: View {
+    let title: String
+    let isExporting: Bool
+    let onNewRecording: () -> Void
+    let onExport: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onNewRecording) {
+                Label("New recording", systemImage: "record.circle")
+            }
+            .buttonStyle(.borderless)
+
+            Divider()
+                .frame(height: 18)
+
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer()
+
+            Button(action: onExport) {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isExporting)
+        }
+        .padding(.horizontal, 18)
+        .frame(height: 46)
+        .background(.bar)
+        .overlay(alignment: .bottom) {
+            Divider()
         }
     }
 }
 
 private struct VideoPreview: View {
-    let isZoomed: Bool
-
-    var body: some View {
-        GeometryReader { proxy in
-            ZStack(alignment: .bottomLeading) {
-                LinearGradient(
-                    colors: [Color(white: 0.04), Color(white: 0.17)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-
-                Path { path in
-                    path.move(to: CGPoint(x: 0, y: proxy.size.height * 0.68))
-                    path.addCurve(
-                        to: CGPoint(x: proxy.size.width, y: proxy.size.height * 0.56),
-                        control1: CGPoint(x: proxy.size.width * 0.21, y: proxy.size.height * 0.40),
-                        control2: CGPoint(x: proxy.size.width * 0.64, y: proxy.size.height * 0.84)
-                    )
-                    path.addLine(to: CGPoint(x: proxy.size.width, y: proxy.size.height))
-                    path.addLine(to: CGPoint(x: 0, y: proxy.size.height))
-                    path.closeSubpath()
-                }
-                .fill(.white.opacity(0.13))
-
-                Path { path in
-                    path.move(to: CGPoint(x: 0, y: proxy.size.height * 0.75))
-                    path.addCurve(
-                        to: CGPoint(x: proxy.size.width, y: proxy.size.height * 0.64),
-                        control1: CGPoint(x: proxy.size.width * 0.25, y: proxy.size.height * 0.55),
-                        control2: CGPoint(x: proxy.size.width * 0.72, y: proxy.size.height * 0.91)
-                    )
-                }
-                .stroke(.white.opacity(0.48), lineWidth: 1)
-
-                HStack {
-                    Label("Aerial coastline.mov", systemImage: "film")
-                    Spacer()
-                    Text("00:12:16")
-                        .fontDesign(.monospaced)
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.88))
-                .padding(16)
-            }
-            .scaleEffect(isZoomed ? 1.28 : 1, anchor: .center)
-            .clipped()
-            .shadow(color: .black.opacity(0.16), radius: 16, y: 5)
-        }
-    }
-}
-
-private struct PlaybackControls: View {
-    @Binding var isPlaying: Bool
-    let onCut: () -> Void
-
-    var body: some View {
-        ControlGroup {
-            Button(action: {}) {
-                Image(systemName: "gobackward.10")
-            }
-            .help("Back 10 seconds")
-
-            Button {
-                isPlaying.toggle()
-            } label: {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-            }
-            .help(isPlaying ? "Pause" : "Play")
-
-            Button(action: {}) {
-                Image(systemName: "goforward.10")
-            }
-            .help("Forward 10 seconds")
-
-            Button(action: onCut) {
-                Image(systemName: "scissors")
-            }
-            .help("Cut at playhead")
-        }
-        .controlSize(.large)
-    }
-}
-
-private struct Timeline: View {
-    @Binding var playhead: Double
-    @Binding var cuts: [Double]
-    @Binding var speeds: [Double]
-    @Binding var selectedSegment: Int
-    private let duration = 12.0
+    @ObservedObject var model: EditorModel
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("TIMELINE")
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(0.7)
-                    .foregroundStyle(.secondary)
+            VideoPlayer(player: model.player)
+                .background(Color.black)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            HStack(spacing: 8) {
+                Button {
+                    model.seek(to: model.playhead - 10)
+                } label: {
+                    Image(systemName: "gobackward.10")
+                }
+                .help("Back 10 seconds")
+
+                Button {
+                    model.togglePlayback()
+                } label: {
+                    Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                        .frame(width: 16)
+                }
+                .keyboardShortcut(.space, modifiers: [])
+                .help(model.isPlaying ? "Pause" : "Play")
+
+                Button {
+                    model.seek(to: model.playhead + 10)
+                } label: {
+                    Image(systemName: "goforward.10")
+                }
+                .help("Forward 10 seconds")
+
+                Divider()
+                    .frame(height: 16)
+
+                Button {
+                    model.cutAtPlayhead()
+                } label: {
+                    Label("Cut", systemImage: "scissors")
+                }
+                .help("Cut at playhead")
 
                 Spacer()
 
-                Text(timecode)
+                Text("\(formattedDuration(model.playhead)) / \(formattedDuration(model.duration))")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 20)
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 14)
             .frame(height: 38)
+            .background(.bar)
+        }
+    }
+}
 
-            Divider()
+private struct ClipInspector: View {
+    @ObservedObject var model: EditorModel
 
-            HStack(spacing: 0) {
-                Text("V1")
-                    .font(.system(size: 11, weight: .medium))
+    private let speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("CLIP INSPECTOR")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.75)
                     .foregroundStyle(.secondary)
-                    .frame(width: 58, height: 100, alignment: .top)
-                    .padding(.top, 47)
 
-                GeometryReader { proxy in
-                    let trackWidth = max(1, proxy.size.width - 20)
-                    let currentPosition = trackWidth * CGFloat(playhead / duration)
-
-                    ZStack(alignment: .topLeading) {
-                        ForEach(0...6, id: \.self) { marker in
-                            let position = trackWidth * CGFloat(marker) / 6
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("\(marker * 2)s")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                Rectangle()
-                                    .fill(.black.opacity(0.18))
-                                    .frame(width: 1, height: 6)
-                            }
-                            .offset(x: position, y: 8)
-                        }
-
-                        ForEach(Array(segmentBoundaries.dropLast().enumerated()), id: \.offset) { index, start in
-                            let end = segmentBoundaries[index + 1]
-                            TimelineClip()
-                                .frame(
-                                    width: max(1, trackWidth * CGFloat((end - start) / duration) - 2),
-                                    height: 58
-                                )
-                                .overlay(alignment: .topTrailing) {
-                                    Text(speedLabel(for: index))
-                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                        .foregroundStyle(.white)
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 3)
-                                        .background(Color.black.opacity(0.55))
-                                }
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(
-                                            index == selectedSegment ? Color.accentColor : .clear,
-                                            lineWidth: 2
-                                        )
-                                }
-                                .offset(
-                                    x: trackWidth * CGFloat(start / duration),
-                                    y: 42
-                                )
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    selectedSegment = index
-                                }
-                        }
-
-                        Rectangle()
-                            .fill(.black)
-                            .frame(width: 1.5, height: proxy.size.height)
-                            .overlay(alignment: .top) {
-                                Capsule()
-                                    .fill(.black)
-                                    .frame(width: 9, height: 9)
-                                    .offset(y: -2)
-                            }
-                            .offset(x: currentPosition, y: 0)
-                    }
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                playhead = min(duration, max(0, Double(value.location.x / trackWidth) * duration))
-                            }
-                    )
-                    .padding(.trailing, 20)
-                }
-            }
-            .padding(.top, 2)
-
-            Spacer(minLength: 0)
-        }
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    private var timecode: String {
-        let frames = Int((playhead - floor(playhead)) * 24)
-        return String(format: "00:00:%02d:%02d", Int(playhead), frames)
-    }
-
-    private var segmentBoundaries: [Double] {
-        [0] + cuts.sorted() + [duration]
-    }
-
-    private func speedLabel(for index: Int) -> String {
-        let speed = speeds.indices.contains(index) ? speeds[index] : 1.0
-        return String(format: "%.2gx", speed)
-    }
-}
-
-private struct TimelineClip: View {
-    var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            HStack(spacing: 1) {
-                ForEach(0..<16, id: \.self) { index in
-                    Color(white: index.isMultiple(of: 4) ? 0.31 : 0.23)
-                }
+                Text(model.selectedClip == nil ? "Select a clip" : "Playback speed")
+                    .font(.system(size: 14, weight: .semibold))
             }
 
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.62)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+            if let selectedClip = model.selectedClip {
+                Text(speedLabel(selectedClip.speed))
+                    .font(.system(size: 30, weight: .medium, design: .rounded))
+                    .contentTransition(.numericText())
 
-            Text("Aerial coastline.mov")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.9))
-                .padding(8)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay {
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(.black.opacity(0.55), lineWidth: 1)
-        }
-    }
-}
-
-private struct SpeedInspector: View {
-    let speed: Double
-    let hasSelection: Bool
-    let onChange: (Double) -> Void
-
-    private let options = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("SPEED")
-                .font(.system(size: 10, weight: .semibold))
-                .tracking(0.7)
-                .foregroundStyle(.secondary)
-
-            if hasSelection {
-                Text(String(format: "%.2gx", speed))
-                    .font(.system(size: 24, weight: .medium, design: .monospaced))
-
-                Picker("Speed", selection: Binding(
-                    get: { speed },
-                    set: onChange
-                )) {
-                    ForEach(options, id: \.self) { option in
-                        Text(String(format: "%.2gx", option))
-                            .tag(option)
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 2),
+                    spacing: 6
+                ) {
+                    ForEach(speeds, id: \.self) { speed in
+                        Button(speedLabel(speed)) {
+                            model.setSpeed(speed, for: selectedClip.id)
+                        }
+                        .buttonStyle(SpeedChipStyle(isSelected: abs(speed - selectedClip.speed) < 0.01))
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("Clip duration", systemImage: "clock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(formattedDuration(selectedClip.outputDuration))
+                        .font(.system(size: 12, design: .monospaced))
+                }
             } else {
-                Text("Select a clip")
+                Text("Click a segment in the V1 lane to adjust it independently.")
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
-            Spacer(minLength: 0)
+            Spacer()
         }
         .padding(16)
         .frame(maxHeight: .infinity, alignment: .topLeading)
@@ -395,107 +440,90 @@ private struct SpeedInspector: View {
     }
 }
 
-private struct ZoomRange: Identifiable {
-    let id = UUID()
-    var start: Double
-    var end: Double
+private struct SpeedChipStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .background {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelected ? Color.accentColor : Color.primary.opacity(configuration.isPressed ? 0.12 : 0.07))
+            }
+            .foregroundStyle(isSelected ? .white : .primary)
+    }
 }
 
-private struct ZoomTimeline: View {
-    @Binding var ranges: [ZoomRange]
-    private let duration = 12.0
+private struct TimelineView: View {
+    @ObservedObject var model: EditorModel
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("ZOOM")
+                Text("TIMELINE")
                     .font(.system(size: 10, weight: .semibold))
-                    .tracking(0.7)
+                    .tracking(0.75)
                     .foregroundStyle(.secondary)
 
                 Spacer()
 
-                Button {
-                    let start = min(duration - 2, (ranges.last?.end ?? 0) + 0.5)
-                    ranges.append(ZoomRange(start: start, end: min(duration, start + 2)))
-                } label: {
-                    Label("Add zoom range", systemImage: "plus")
-                }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                .help("Add zoom range")
+                Text(formattedDuration(model.playhead))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 20)
-            .frame(height: 38)
+            .padding(.horizontal, 16)
+            .frame(height: 31)
 
             Divider()
 
             HStack(spacing: 0) {
-                Text("ZOOM")
-                    .font(.system(size: 11, weight: .medium))
+                Text("V1")
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 58, alignment: .top)
+                    .frame(width: 48, height: 72, alignment: .top)
+                    .padding(.top, 27)
 
                 GeometryReader { proxy in
-                    let trackWidth = max(1, proxy.size.width - 20)
+                    let trackWidth = max(1, proxy.size.width - 14)
+                    let duration = max(0.01, model.duration)
 
-                    ZStack(alignment: .leading) {
-                        ForEach($ranges) { $range in
-                            let x = trackWidth * CGFloat(range.start / duration)
-                            let width = max(20, trackWidth * CGFloat((range.end - range.start) / duration))
+                    ZStack(alignment: .topLeading) {
+                        TimelineRuler(duration: duration, width: trackWidth)
 
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.accentColor.opacity(0.22))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Color.accentColor, lineWidth: 1.5)
-                                }
-                                .frame(width: width, height: 42)
-                                .overlay(alignment: .leading) {
-                                    Capsule()
-                                        .fill(Color.accentColor)
-                                        .frame(width: 5, height: 24)
-                                        .padding(.leading, 4)
-                                        .gesture(
-                                            DragGesture()
-                                                .onEnded { value in
-                                                    let delta = Double(value.translation.width / trackWidth) * duration
-                                                    range.start = min(range.end - 0.25, max(0, range.start + delta))
-                                                }
-                                        )
-                                }
-                                .overlay(alignment: .trailing) {
-                                    Capsule()
-                                        .fill(Color.accentColor)
-                                        .frame(width: 5, height: 24)
-                                        .padding(.trailing, 4)
-                                        .gesture(
-                                            DragGesture()
-                                                .onEnded { value in
-                                                    let delta = Double(value.translation.width / trackWidth) * duration
-                                                    range.end = min(duration, max(range.start + 0.25, range.end + delta))
-                                                }
-                                        )
-                                }
-                                .offset(x: x)
-                                .gesture(
-                                    DragGesture()
-                                        .onEnded { value in
-                                            let delta = Double(value.translation.width / trackWidth) * duration
-                                            let length = range.end - range.start
-                                            let newStart = min(duration - length, max(0, range.start + delta))
-                                            range.start = newStart
-                                            range.end = newStart + length
-                                        }
-                                )
+                        ForEach(model.timelineClips) { layout in
+                            let x = trackWidth * CGFloat(layout.start / duration)
+                            let width = max(2, trackWidth * CGFloat(layout.duration / duration) - 2)
+
+                            TimelineClipBlock(
+                                title: model.clipTitle,
+                                speed: layout.clip.speed,
+                                isSelected: model.selectedClipID == layout.clip.id
+                            )
+                            .frame(width: width, height: 48)
+                            .offset(x: x, y: 24)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                model.selectClip(layout.clip.id)
+                            }
                         }
+
+                        PlayheadView()
+                            .frame(height: proxy.size.height)
+                            .offset(x: trackWidth * CGFloat(model.playhead / duration))
                     }
-                    .frame(height: 48)
-                    .padding(.trailing, 20)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                model.seek(to: Double(value.location.x / trackWidth) * duration)
+                            }
+                    )
+                    .padding(.trailing, 14)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 12)
+            .padding(.top, 2)
 
             Spacer(minLength: 0)
         }
@@ -503,7 +531,349 @@ private struct ZoomTimeline: View {
     }
 }
 
-#Preview {
-    ContentView()
-        .frame(width: 1180, height: 760)
+private struct TimelineRuler: View {
+    let duration: Double
+    let width: CGFloat
+
+    var body: some View {
+        ForEach(0...6, id: \.self) { marker in
+            let fraction = CGFloat(marker) / 6
+            VStack(alignment: .leading, spacing: 3) {
+                Text(formattedDuration(duration * Double(fraction)))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                Rectangle()
+                    .fill(Color.primary.opacity(0.15))
+                    .frame(width: 1, height: 5)
+            }
+            .offset(x: width * fraction, y: 5)
+        }
+    }
+}
+
+private struct TimelineClipBlock: View {
+    let title: String
+    let speed: Double
+    let isSelected: Bool
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            HStack(spacing: 1) {
+                ForEach(0..<18, id: \.self) { index in
+                    Color(
+                        red: 0.22 + Double(index.isMultiple(of: 4) ? 0.09 : 0),
+                        green: 0.33 + Double(index.isMultiple(of: 5) ? 0.08 : 0),
+                        blue: 0.45 + Double(index.isMultiple(of: 3) ? 0.08 : 0)
+                    )
+                }
+            }
+
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.62)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            HStack(spacing: 5) {
+                Text(title)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(speedLabel(speed))
+                    .fontDesign(.monospaced)
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(6)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay {
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(isSelected ? Color.accentColor : .black.opacity(0.45), lineWidth: isSelected ? 2 : 1)
+        }
+    }
+}
+
+private struct PlayheadView: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.accentColor)
+            .frame(width: 1.5)
+            .overlay(alignment: .top) {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 8, height: 8)
+                    .offset(y: -2)
+            }
+    }
+}
+
+private struct ZoomLane: View {
+    @ObservedObject var model: EditorModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("ZOOM")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.75)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button {
+                    model.addZoomRange()
+                } label: {
+                    Label("Add zoom range", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+                .labelStyle(.iconOnly)
+                .help("Add zoom range at the playhead")
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 29)
+
+            Divider()
+
+            HStack(spacing: 0) {
+                Text("ZOOM")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 48, height: 40, alignment: .top)
+                    .padding(.top, 12)
+
+                GeometryReader { proxy in
+                    let trackWidth = max(1, proxy.size.width - 14)
+                    let duration = max(0.01, model.duration)
+
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.primary.opacity(0.05))
+                            .frame(height: 34)
+
+                        ForEach(model.zoomRanges) { range in
+                            ZoomRangeBlock(
+                                range: range,
+                                duration: duration,
+                                trackWidth: trackWidth,
+                                onChange: model.updateZoomRange,
+                                onRemove: { model.removeZoomRange(id: range.id) }
+                            )
+                        }
+
+                        PlayheadView()
+                            .frame(height: 40)
+                            .offset(x: trackWidth * CGFloat(model.playhead / duration))
+                    }
+                    .frame(height: 40)
+                    .padding(.trailing, 14)
+                }
+            }
+            .padding(.top, 4)
+
+            Spacer(minLength: 0)
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+private struct ZoomRangeBlock: View {
+    let range: ZoomRange
+    let duration: Double
+    let trackWidth: CGFloat
+    let onChange: (ZoomRange) -> Void
+    let onRemove: () -> Void
+
+    @State private var moveStart: ZoomRange?
+    @State private var resizeStart: ZoomRange?
+
+    private var x: CGFloat {
+        trackWidth * CGFloat(range.start / duration)
+    }
+
+    private var width: CGFloat {
+        max(24, trackWidth * CGFloat((range.end - range.start) / duration))
+    }
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 5)
+            .fill(Color.accentColor.opacity(0.20))
+            .overlay {
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.accentColor, lineWidth: 1.25)
+            }
+            .frame(width: width, height: 34)
+            .overlay(alignment: .leading) {
+                rangeHandle
+                    .padding(.leading, 4)
+                    .highPriorityGesture(resizeGesture(isLeading: true))
+            }
+            .overlay(alignment: .trailing) {
+                HStack(spacing: 4) {
+                    Button(action: onRemove) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .buttonStyle(.borderless)
+                    .opacity(width > 62 ? 1 : 0)
+
+                    rangeHandle
+                        .highPriorityGesture(resizeGesture(isLeading: false))
+                }
+                .padding(.trailing, 4)
+            }
+            .offset(x: x)
+            .gesture(moveGesture)
+            .help("Drag to move the zoom range. Drag its edges to resize.")
+    }
+
+    private var rangeHandle: some View {
+        Capsule()
+            .fill(Color.accentColor)
+            .frame(width: 4, height: 18)
+    }
+
+    private var moveGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                let initial = moveStart ?? range
+                if moveStart == nil {
+                    moveStart = initial
+                }
+                let delta = Double(value.translation.width / trackWidth) * duration
+                let length = initial.end - initial.start
+                let start = min(duration - length, max(0, initial.start + delta))
+                onChange(ZoomRange(id: initial.id, start: start, end: start + length))
+            }
+            .onEnded { _ in
+                moveStart = nil
+            }
+    }
+
+    private func resizeGesture(isLeading: Bool) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                let initial = resizeStart ?? range
+                if resizeStart == nil {
+                    resizeStart = initial
+                }
+                let delta = Double(value.translation.width / trackWidth) * duration
+                let minimumLength = 0.25
+                let updated: ZoomRange
+
+                if isLeading {
+                    updated = ZoomRange(
+                        id: initial.id,
+                        start: min(initial.end - minimumLength, max(0, initial.start + delta)),
+                        end: initial.end
+                    )
+                } else {
+                    updated = ZoomRange(
+                        id: initial.id,
+                        start: initial.start,
+                        end: max(initial.start + minimumLength, min(duration, initial.end + delta))
+                    )
+                }
+                onChange(updated)
+            }
+            .onEnded { _ in
+                resizeStart = nil
+            }
+    }
+}
+
+private struct ExportOverlay: View {
+    let state: EditorModel.ExportState
+    let dismiss: () -> Void
+
+    var body: some View {
+        switch state {
+        case .idle:
+            EmptyView()
+
+        case let .exporting(progress):
+            VStack(spacing: 12) {
+                ProgressView(value: progress)
+                    .frame(width: 220)
+                Text("Exporting \(Int(progress * 100))%")
+                    .font(.callout)
+            }
+            .padding(20)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
+            .shadow(radius: 14)
+
+        case let .completed(url):
+            ExportMessage(
+                symbol: "checkmark.circle.fill",
+                color: .green,
+                title: "Export complete",
+                message: url.lastPathComponent,
+                actionTitle: "Show in Finder",
+                action: {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                    dismiss()
+                },
+                dismiss: dismiss
+            )
+
+        case let .failed(message):
+            ExportMessage(
+                symbol: "exclamationmark.triangle.fill",
+                color: .orange,
+                title: "Export failed",
+                message: message,
+                actionTitle: nil,
+                action: nil,
+                dismiss: dismiss
+            )
+        }
+    }
+}
+
+private struct ExportMessage: View {
+    let symbol: String
+    let color: Color
+    let title: String
+    let message: String
+    let actionTitle: String?
+    let action: (() -> Void)?
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: symbol)
+                .font(.title)
+                .foregroundStyle(color)
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+
+            HStack {
+                if let actionTitle, let action {
+                    Button(actionTitle, action: action)
+                }
+                Button("Done", action: dismiss)
+            }
+        }
+        .padding(20)
+        .frame(width: 280)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
+        .shadow(radius: 14)
+    }
+}
+
+func formattedDuration(_ seconds: TimeInterval) -> String {
+    guard seconds.isFinite else { return "00:00" }
+    let total = max(0, Int(seconds.rounded(.down)))
+    return String(format: "%02d:%02d", total / 60, total % 60)
+}
+
+private func speedLabel(_ speed: Double) -> String {
+    if speed.rounded() == speed {
+        return String(format: "%.0fx", speed)
+    }
+    return String(format: "%.2gx", speed)
 }

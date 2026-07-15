@@ -1,0 +1,493 @@
+//
+//  EditorModel.swift
+//  viewio
+//
+
+import AppKit
+import AVFoundation
+import Combine
+import Foundation
+import UniformTypeIdentifiers
+
+struct EditClip: Identifiable, Equatable {
+    let id: UUID
+    var sourceStart: Double
+    var sourceEnd: Double
+    var speed: Double
+
+    init(id: UUID = UUID(), sourceStart: Double, sourceEnd: Double, speed: Double = 1) {
+        self.id = id
+        self.sourceStart = sourceStart
+        self.sourceEnd = sourceEnd
+        self.speed = speed
+    }
+
+    var sourceDuration: Double {
+        max(0, sourceEnd - sourceStart)
+    }
+
+    var outputDuration: Double {
+        sourceDuration / speed
+    }
+}
+
+struct ZoomRange: Identifiable, Equatable {
+    let id: UUID
+    var start: Double
+    var end: Double
+
+    init(id: UUID = UUID(), start: Double, end: Double) {
+        self.id = id
+        self.start = start
+        self.end = end
+    }
+}
+
+struct TimelineClipLayout: Identifiable {
+    let clip: EditClip
+    let start: Double
+    let end: Double
+
+    var id: UUID { clip.id }
+    var duration: Double { end - start }
+}
+
+@MainActor
+final class EditorModel: ObservableObject {
+    enum LoadState: Equatable {
+        case loading
+        case ready
+        case failed(String)
+    }
+
+    enum ExportState: Equatable {
+        case idle
+        case exporting(Double)
+        case completed(URL)
+        case failed(String)
+    }
+
+    let sourceURL: URL
+    let player = AVPlayer()
+
+    @Published private(set) var loadState: LoadState = .loading
+    @Published private(set) var exportState: ExportState = .idle
+    @Published private(set) var duration: Double = 0
+    @Published var playhead: Double = 0
+    @Published private(set) var clips: [EditClip] = []
+    @Published private(set) var zoomRanges: [ZoomRange] = []
+    @Published var selectedClipID: UUID?
+    @Published var isPlaying = false
+
+    private var sourceAsset: AVURLAsset?
+    private var sourceVideoTrack: AVAssetTrack?
+    private var sourceAudioTracks: [AVAssetTrack] = []
+    private var timeObserver: Any?
+    private var exportSession: AVAssetExportSession?
+    private var exportProgressTimer: Timer?
+    private var isSeeking = false
+
+    init(sourceURL: URL) {
+        self.sourceURL = sourceURL
+        installTimeObserver()
+        Task {
+            await loadSource()
+        }
+    }
+
+    deinit {
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+        }
+    }
+
+    var timelineClips: [TimelineClipLayout] {
+        var cursor = 0.0
+        return clips.map { clip in
+            let layout = TimelineClipLayout(
+                clip: clip,
+                start: cursor,
+                end: cursor + clip.outputDuration
+            )
+            cursor = layout.end
+            return layout
+        }
+    }
+
+    var selectedClip: EditClip? {
+        guard let selectedClipID else { return nil }
+        return clips.first { $0.id == selectedClipID }
+    }
+
+    var clipTitle: String {
+        sourceURL.deletingPathExtension().lastPathComponent
+    }
+
+    func togglePlayback() {
+        if player.timeControlStatus == .playing {
+            player.pause()
+            isPlaying = false
+        } else {
+            if playhead >= duration - 0.01 {
+                seek(to: 0)
+            }
+            player.play()
+            isPlaying = true
+        }
+    }
+
+    func seek(to time: Double) {
+        let clamped = min(duration, max(0, time))
+        playhead = clamped
+        isSeeking = true
+        player.seek(
+            to: CMTime(seconds: clamped, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.isSeeking = false
+            }
+        }
+    }
+
+    func cutAtPlayhead() {
+        guard let clipIndex = timelineClips.firstIndex(where: { layout in
+            playhead > layout.start + 0.04 && playhead < layout.end - 0.04
+        }) else {
+            return
+        }
+
+        let layout = timelineClips[clipIndex]
+        let clip = clips[clipIndex]
+        let sourceCut = clip.sourceStart + (playhead - layout.start) * clip.speed
+        guard sourceCut > clip.sourceStart + 0.04, sourceCut < clip.sourceEnd - 0.04 else {
+            return
+        }
+
+        let left = EditClip(
+            sourceStart: clip.sourceStart,
+            sourceEnd: sourceCut,
+            speed: clip.speed
+        )
+        let right = EditClip(
+            sourceStart: sourceCut,
+            sourceEnd: clip.sourceEnd,
+            speed: clip.speed
+        )
+        clips.replaceSubrange(clipIndex...clipIndex, with: [left, right])
+        selectedClipID = right.id
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func selectClip(_ id: UUID) {
+        selectedClipID = id
+    }
+
+    func setSpeed(_ speed: Double, for clipID: UUID) {
+        guard let index = clips.firstIndex(where: { $0.id == clipID }) else { return }
+        clips[index].speed = speed
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func addZoomRange() {
+        let start = min(max(0, playhead), max(0, duration - 1.5))
+        let end = min(duration, start + min(2, max(0.5, duration)))
+        zoomRanges.append(ZoomRange(start: start, end: end))
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func updateZoomRange(_ range: ZoomRange) {
+        guard let index = zoomRanges.firstIndex(where: { $0.id == range.id }) else { return }
+        let minimumLength = min(0.25, max(0.05, duration))
+        zoomRanges[index].start = min(max(0, range.start), max(0, duration - minimumLength))
+        zoomRanges[index].end = min(duration, max(zoomRanges[index].start + minimumLength, range.end))
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func removeZoomRange(id: UUID) {
+        zoomRanges.removeAll { $0.id == id }
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func export() {
+        guard case .ready = loadState else { return }
+        guard !clips.isEmpty else { return }
+
+        let panel = NSSavePanel()
+        panel.title = "Export Video"
+        panel.message = "Choose where to save the edited recording."
+        panel.nameFieldStringValue = "\(clipTitle) Edited.mp4"
+        panel.allowedContentTypes = [.mpeg4Movie]
+        panel.canCreateDirectories = true
+
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+        export(to: outputURL)
+    }
+
+    func export(to outputURL: URL) {
+        guard case .ready = loadState else { return }
+        guard !clips.isEmpty else { return }
+        startExport(to: outputURL)
+    }
+
+    func dismissExportMessage() {
+        switch exportState {
+        case .completed, .failed:
+            exportState = .idle
+        case .idle, .exporting:
+            break
+        }
+    }
+
+    private func loadSource() async {
+        let asset = AVURLAsset(url: sourceURL)
+
+        do {
+            let assetDuration = try await asset.load(.duration)
+            let videoTracks = try await asset.loadTracks(withMediaType: .video)
+            let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+
+            guard let videoTrack = videoTracks.first else {
+                throw EditorError.missingVideoTrack
+            }
+
+            let seconds = assetDuration.seconds
+            guard seconds.isFinite, seconds > 0 else {
+                throw EditorError.invalidDuration
+            }
+
+            sourceAsset = asset
+            sourceVideoTrack = videoTrack
+            sourceAudioTracks = audioTracks
+            clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
+            selectedClipID = clips.first?.id
+            duration = seconds
+            loadState = .ready
+            rebuildPreview(preservingPlayhead: false)
+        } catch {
+            loadState = .failed(error.localizedDescription)
+        }
+    }
+
+    private func rebuildPreview(preservingPlayhead: Bool) {
+        guard let build = makeComposition() else { return }
+        let previousPlayhead = preservingPlayhead ? min(playhead, build.duration) : 0
+
+        let item = AVPlayerItem(asset: build.composition)
+        item.videoComposition = build.videoComposition
+        player.replaceCurrentItem(with: item)
+        duration = build.duration
+        playhead = previousPlayhead
+        isPlaying = false
+        player.pause()
+
+        if previousPlayhead > 0 {
+            seek(to: previousPlayhead)
+        }
+    }
+
+    private func makeComposition() -> (composition: AVMutableComposition, videoComposition: AVMutableVideoComposition, duration: Double)? {
+        guard let sourceVideoTrack else { return nil }
+
+        let composition = AVMutableComposition()
+        guard let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            return nil
+        }
+
+        compositionVideoTrack.preferredTransform = sourceVideoTrack.preferredTransform
+        let compositionAudioTracks = sourceAudioTracks.compactMap { _ in
+            composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+        }
+
+        var cursor = CMTime.zero
+        for clip in clips {
+            let sourceDuration = CMTime(seconds: clip.sourceDuration, preferredTimescale: 600)
+            let sourceRange = CMTimeRange(
+                start: CMTime(seconds: clip.sourceStart, preferredTimescale: 600),
+                duration: sourceDuration
+            )
+
+            do {
+                try compositionVideoTrack.insertTimeRange(sourceRange, of: sourceVideoTrack, at: cursor)
+                for (sourceAudioTrack, compositionAudioTrack) in zip(sourceAudioTracks, compositionAudioTracks) {
+                    try compositionAudioTrack.insertTimeRange(sourceRange, of: sourceAudioTrack, at: cursor)
+                }
+            } catch {
+                continue
+            }
+
+            let outputDuration = CMTime(seconds: clip.outputDuration, preferredTimescale: 600)
+            if clip.speed != 1 {
+                let insertedRange = CMTimeRange(start: cursor, duration: sourceDuration)
+                compositionVideoTrack.scaleTimeRange(insertedRange, toDuration: outputDuration)
+                for compositionAudioTrack in compositionAudioTracks {
+                    compositionAudioTrack.scaleTimeRange(insertedRange, toDuration: outputDuration)
+                }
+            }
+
+            cursor = cursor + outputDuration
+        }
+
+        let videoComposition = makeVideoComposition(
+            compositionTrack: compositionVideoTrack,
+            sourceTrack: sourceVideoTrack,
+            duration: cursor
+        )
+        return (composition, videoComposition, max(0, cursor.seconds))
+    }
+
+    private func makeVideoComposition(
+        compositionTrack: AVCompositionTrack,
+        sourceTrack: AVAssetTrack,
+        duration: CMTime
+    ) -> AVMutableVideoComposition {
+        let naturalSize = sourceTrack.naturalSize
+        let transformedSize = naturalSize.applying(sourceTrack.preferredTransform)
+        let renderSize = CGSize(
+            width: max(1, abs(transformedSize.width)),
+            height: max(1, abs(transformedSize.height))
+        )
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.renderSize = renderSize
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
+
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+
+        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
+        let baseTransform = sourceTrack.preferredTransform
+        layerInstruction.setTransform(baseTransform, at: .zero)
+
+        let zoomTransform = baseTransform.concatenating(centeredZoomTransform(renderSize: renderSize))
+        for event in zoomTransformEvents(
+            baseTransform: baseTransform,
+            zoomTransform: zoomTransform,
+            duration: duration.seconds
+        ) {
+            layerInstruction.setTransform(event.transform, at: event.time)
+        }
+
+        instruction.layerInstructions = [layerInstruction]
+        videoComposition.instructions = [instruction]
+        return videoComposition
+    }
+
+    private func centeredZoomTransform(renderSize: CGSize) -> CGAffineTransform {
+        let scale: CGFloat = 1.24
+        return CGAffineTransform(
+            translationX: renderSize.width * (1 - scale) / 2,
+            y: renderSize.height * (1 - scale) / 2
+        )
+        .scaledBy(x: scale, y: scale)
+    }
+
+    private func zoomTransformEvents(
+        baseTransform: CGAffineTransform,
+        zoomTransform: CGAffineTransform,
+        duration: Double
+    ) -> [(time: CMTime, transform: CGAffineTransform)] {
+        var events: [(time: Double, transform: CGAffineTransform)] = []
+
+        for range in zoomRanges {
+            let start = min(duration, max(0, range.start))
+            let end = min(duration, max(start, range.end))
+            guard end > start else { continue }
+            events.append((start, zoomTransform))
+            events.append((end, baseTransform))
+        }
+
+        return events
+            .sorted { $0.time < $1.time }
+            .map { (CMTime(seconds: $0.time, preferredTimescale: 600), $0.transform) }
+    }
+
+    private func startExport(to outputURL: URL) {
+        guard let build = makeComposition() else {
+            exportState = .failed("Unable to prepare this recording for export.")
+            return
+        }
+
+        try? FileManager.default.removeItem(at: outputURL)
+
+        guard let session = AVAssetExportSession(
+            asset: build.composition,
+            presetName: AVAssetExportPresetHighestQuality
+        ) else {
+            exportState = .failed("This recording cannot be exported on this Mac.")
+            return
+        }
+
+        session.outputURL = outputURL
+        session.outputFileType = .mp4
+        session.videoComposition = build.videoComposition
+        session.shouldOptimizeForNetworkUse = true
+        exportSession = session
+        exportState = .exporting(0)
+        startExportProgressTimer(for: session)
+
+        session.exportAsynchronously { [weak self] in
+            Task { @MainActor in
+                self?.finishExport(session: session, outputURL: outputURL)
+            }
+        }
+    }
+
+    private func startExportProgressTimer(for session: AVAssetExportSession) {
+        exportProgressTimer?.invalidate()
+        exportProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.exportState = .exporting(Double(session.progress))
+            }
+        }
+    }
+
+    private func finishExport(session: AVAssetExportSession, outputURL: URL) {
+        exportProgressTimer?.invalidate()
+        exportProgressTimer = nil
+        exportSession = nil
+
+        switch session.status {
+        case .completed:
+            exportState = .completed(outputURL)
+        case .failed, .cancelled:
+            exportState = .failed(session.error?.localizedDescription ?? "Export did not finish.")
+        default:
+            exportState = .failed("Export ended unexpectedly.")
+        }
+    }
+
+    private func installTimeObserver() {
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 1.0 / 30.0, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] time in
+            Task { @MainActor in
+                guard let self, !self.isSeeking else { return }
+                let seconds = time.seconds
+                guard seconds.isFinite else { return }
+                self.playhead = min(self.duration, max(0, seconds))
+                self.isPlaying = self.player.timeControlStatus == .playing
+            }
+        }
+    }
+}
+
+private enum EditorError: LocalizedError {
+    case missingVideoTrack
+    case invalidDuration
+
+    var errorDescription: String? {
+        switch self {
+        case .missingVideoTrack:
+            "The recording does not contain a video track."
+        case .invalidDuration:
+            "The recording has no playable duration."
+        }
+    }
+}
