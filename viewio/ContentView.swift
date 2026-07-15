@@ -11,15 +11,26 @@ struct ContentView: View {
     @State private var isPlaying = false
     @State private var playhead: Double = 4.0
     @State private var hasMockVideo = true
+    @State private var zoomRanges: [ZoomRange] = [ZoomRange(start: 2, end: 4)]
 
     var body: some View {
         VStack(spacing: 0) {
-            PreviewWorkspace(isPlaying: $isPlaying, hasVideo: hasMockVideo)
+            PreviewWorkspace(
+                isPlaying: $isPlaying,
+                hasVideo: hasMockVideo,
+                zoomRanges: zoomRanges,
+                playhead: playhead
+            )
 
             Divider()
 
             Timeline(playhead: $playhead)
                 .frame(height: 208)
+
+            Divider()
+
+            ZoomTimeline(ranges: $zoomRanges)
+                .frame(height: 118)
         }
         .frame(minWidth: 920, minHeight: 660)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -29,12 +40,14 @@ struct ContentView: View {
 private struct PreviewWorkspace: View {
     @Binding var isPlaying: Bool
     let hasVideo: Bool
+    let zoomRanges: [ZoomRange]
+    let playhead: Double
 
     var body: some View {
         GeometryReader { proxy in
             HStack(alignment: .bottom, spacing: 28) {
                 if hasVideo {
-                    VideoPreview()
+                    VideoPreview(isZoomed: zoomRanges.contains { $0.start...$0.end ~= playhead })
                         .aspectRatio(16 / 9, contentMode: .fit)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 } else {
@@ -55,6 +68,8 @@ private struct PreviewWorkspace: View {
 }
 
 private struct VideoPreview: View {
+    let isZoomed: Bool
+
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .bottomLeading) {
@@ -97,6 +112,8 @@ private struct VideoPreview: View {
                 .foregroundStyle(.white.opacity(0.88))
                 .padding(16)
             }
+            .scaleEffect(isZoomed ? 1.28 : 1, anchor: .center)
+            .clipped()
             .shadow(color: .black.opacity(0.16), radius: 16, y: 5)
         }
     }
@@ -239,6 +256,114 @@ private struct TimelineClip: View {
             RoundedRectangle(cornerRadius: 4)
                 .stroke(.black.opacity(0.55), lineWidth: 1)
         }
+    }
+}
+
+private struct ZoomRange: Identifiable {
+    let id = UUID()
+    var start: Double
+    var end: Double
+}
+
+private struct ZoomTimeline: View {
+    @Binding var ranges: [ZoomRange]
+    private let duration = 12.0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("ZOOM")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.7)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button {
+                    let start = min(duration - 2, (ranges.last?.end ?? 0) + 0.5)
+                    ranges.append(ZoomRange(start: start, end: min(duration, start + 2)))
+                } label: {
+                    Label("Add zoom range", systemImage: "plus")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .help("Add zoom range")
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 38)
+
+            Divider()
+
+            HStack(spacing: 0) {
+                Text("ZOOM")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 58, alignment: .top)
+
+                GeometryReader { proxy in
+                    let trackWidth = max(1, proxy.size.width - 20)
+
+                    ZStack(alignment: .leading) {
+                        ForEach($ranges) { $range in
+                            let x = trackWidth * CGFloat(range.start / duration)
+                            let width = max(20, trackWidth * CGFloat((range.end - range.start) / duration))
+
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.accentColor.opacity(0.22))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.accentColor, lineWidth: 1.5)
+                                }
+                                .frame(width: width, height: 42)
+                                .overlay(alignment: .leading) {
+                                    Capsule()
+                                        .fill(Color.accentColor)
+                                        .frame(width: 5, height: 24)
+                                        .padding(.leading, 4)
+                                        .gesture(
+                                            DragGesture()
+                                                .onEnded { value in
+                                                    let delta = Double(value.translation.width / trackWidth) * duration
+                                                    range.start = min(range.end - 0.25, max(0, range.start + delta))
+                                                }
+                                        )
+                                }
+                                .overlay(alignment: .trailing) {
+                                    Capsule()
+                                        .fill(Color.accentColor)
+                                        .frame(width: 5, height: 24)
+                                        .padding(.trailing, 4)
+                                        .gesture(
+                                            DragGesture()
+                                                .onEnded { value in
+                                                    let delta = Double(value.translation.width / trackWidth) * duration
+                                                    range.end = min(duration, max(range.start + 0.25, range.end + delta))
+                                                }
+                                        )
+                                }
+                                .offset(x: x)
+                                .gesture(
+                                    DragGesture()
+                                        .onEnded { value in
+                                            let delta = Double(value.translation.width / trackWidth) * duration
+                                            let length = range.end - range.start
+                                            let newStart = min(duration - length, max(0, range.start + delta))
+                                            range.start = newStart
+                                            range.end = newStart + length
+                                        }
+                                )
+                        }
+                    }
+                    .frame(height: 48)
+                    .padding(.trailing, 20)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+
+            Spacer(minLength: 0)
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 }
 
