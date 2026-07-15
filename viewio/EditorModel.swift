@@ -128,6 +128,7 @@ final class EditorModel: ObservableObject {
     @Published var selectedZoomID: UUID?
 
     private var cursorTrack: [CursorPosition] = []
+    private var clickEvents: [ClickEvent] = []
     @Published var isPlaying = false
 
     private var sourceAsset: AVURLAsset?
@@ -296,6 +297,44 @@ final class EditorModel: ObservableObject {
         rebuildPreview(preservingPlayhead: true)
     }
 
+    func generateAutoZoomRanges() {
+        guard !cursorTrack.isEmpty else { return }
+
+        var candidates: [ZoomRange] = []
+
+        for click in clickEvents {
+            let start = max(0, click.time - 0.4)
+            let end = min(duration, click.time + 0.8)
+            candidates.append(ZoomRange(start: start, end: end))
+        }
+
+        for pause in findPauseSegments() {
+            let start = max(0, pause.start - 0.2)
+            let end = min(duration, pause.end + 0.2)
+            candidates.append(ZoomRange(start: start, end: end))
+        }
+
+        let merged = mergeZoomRanges(candidates)
+
+        zoomRanges = merged.compactMap { range in
+            let positions = cursorPositions(in: range.start...range.end)
+            let spread = spatialSpread(of: positions)
+            guard spread <= 0.6 else { return nil }
+            let amount = min(2.5, max(1.2, 1.2 + (1 - spread) * 1.3))
+            return ZoomRange(
+                id: range.id,
+                start: range.start,
+                end: range.end,
+                amount: amount,
+                entryAnimation: range.entryAnimation,
+                exitAnimation: range.exitAnimation
+            )
+        }
+
+        selectedZoomID = nil
+        rebuildPreview(preservingPlayhead: true)
+    }
+
     func export() {
         guard case .ready = loadState else { return }
         guard !clips.isEmpty else { return }
@@ -338,6 +377,18 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    private func loadClickEvents() -> [ClickEvent] {
+        let clicksURL = sourceURL.deletingPathExtension().appendingPathExtension("clicks.json")
+        guard FileManager.default.fileExists(atPath: clicksURL.path) else { return [] }
+        do {
+            let data = try Data(contentsOf: clicksURL)
+            return try JSONDecoder().decode([ClickEvent].self, from: data)
+        } catch {
+            print("Failed to load click events: \(error)")
+            return []
+        }
+    }
+
     private func loadSource() async {
         let asset = AVURLAsset(url: sourceURL)
 
@@ -359,6 +410,7 @@ final class EditorModel: ObservableObject {
             sourceVideoTrack = videoTrack
             sourceAudioTracks = audioTracks
             cursorTrack = loadCursorTrack()
+            clickEvents = loadClickEvents()
             clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
             selectedClipID = clips.first?.id
             duration = seconds
@@ -501,6 +553,78 @@ final class EditorModel: ObservableObject {
             return CGPoint(x: last.x, y: last.y)
         }
         return CGPoint(x: 0.5, y: 0.5)
+    }
+
+    private func findPauseSegments() -> [(start: Double, end: Double)] {
+        guard cursorTrack.count >= 2 else { return [] }
+
+        let velocityThreshold: Double = 0.2
+        let minimumPauseDuration: Double = 0.3
+
+        var pauses: [(start: Double, end: Double)] = []
+        var pauseStart: Double?
+
+        for index in 0..<(cursorTrack.count - 1) {
+            let current = cursorTrack[index]
+            let next = cursorTrack[index + 1]
+            let dx = next.x - current.x
+            let dy = next.y - current.y
+            let dt = next.time - current.time
+            let velocity = dt > 0 ? sqrt(dx * dx + dy * dy) / dt : 0
+
+            if velocity < velocityThreshold {
+                if pauseStart == nil {
+                    pauseStart = current.time
+                }
+            } else if let start = pauseStart {
+                let end = current.time
+                if end - start >= minimumPauseDuration {
+                    pauses.append((start: start, end: end))
+                }
+                pauseStart = nil
+            }
+        }
+
+        if let start = pauseStart, let last = cursorTrack.last {
+            let end = last.time
+            if end - start >= minimumPauseDuration {
+                pauses.append((start: start, end: end))
+            }
+        }
+
+        return pauses
+    }
+
+    private func mergeZoomRanges(_ ranges: [ZoomRange]) -> [ZoomRange] {
+        guard !ranges.isEmpty else { return [] }
+
+        let sorted = ranges.sorted { $0.start < $1.start }
+        var merged: [ZoomRange] = [sorted[0]]
+
+        for range in sorted.dropFirst() {
+            var last = merged[merged.count - 1]
+            if range.start <= last.end {
+                last.end = max(last.end, range.end)
+                merged[merged.count - 1] = last
+            } else {
+                merged.append(range)
+            }
+        }
+
+        return merged
+    }
+
+    private func cursorPositions(in timeRange: ClosedRange<Double>) -> [CursorPosition] {
+        cursorTrack.filter { $0.time >= timeRange.lowerBound && $0.time <= timeRange.upperBound }
+    }
+
+    private func spatialSpread(of positions: [CursorPosition]) -> Double {
+        guard positions.count >= 2 else { return 0 }
+        let xs = positions.map { $0.x }
+        let ys = positions.map { $0.y }
+        let width = xs.max()! - xs.min()!
+        let height = ys.max()! - ys.min()!
+        return max(0, min(1, max(width, height)))
     }
 
     private func zoomScale(at time: Double, range: ZoomRange, transition: Double) -> CGFloat {

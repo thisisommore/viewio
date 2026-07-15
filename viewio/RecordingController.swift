@@ -29,6 +29,11 @@ struct CursorPosition: Codable, Equatable {
     let y: Double
 }
 
+struct ClickEvent: Codable, Equatable {
+    let time: TimeInterval
+    let button: Int
+}
+
 @MainActor
 final class RecordingController: NSObject, ObservableObject {
     enum State: Equatable {
@@ -56,7 +61,9 @@ final class RecordingController: NSObject, ObservableObject {
     private var timer: Timer?
     private var cursorTimer: Timer?
     private var cursorTrack: [CursorPosition] = []
+    private var clickEvents: [ClickEvent] = []
     private var recordedDisplayID: CGDirectDisplayID?
+    private var wasLeftButtonDown = false
 
     var isRecording: Bool {
         switch state {
@@ -242,6 +249,8 @@ final class RecordingController: NSObject, ObservableObject {
     private func startCursorTracking() {
         stopCursorTracking()
         cursorTrack = []
+        clickEvents = []
+        wasLeftButtonDown = false
         guard let recordedDisplayID else { return }
         let bounds = CGDisplayBounds(recordedDisplayID)
 
@@ -251,14 +260,24 @@ final class RecordingController: NSObject, ObservableObject {
                 let location = NSEvent.mouseLocation
                 let relativeX = (location.x - bounds.origin.x) / bounds.width
                 let relativeY = (location.y - bounds.origin.y) / bounds.height
+                let time = Date().timeIntervalSince(startedAt)
                 let position = CursorPosition(
-                    time: Date().timeIntervalSince(startedAt),
+                    time: time,
                     x: max(0, min(1, relativeX)),
                     y: max(0, min(1, relativeY))
                 )
                 self.cursorTrack.append(position)
+                self.recordClickIfNeeded(at: time)
             }
         }
+    }
+
+    private func recordClickIfNeeded(at time: TimeInterval) {
+        let isDown = CGEventSource.buttonState(.combinedSessionState, button: .left)
+        if isDown && !wasLeftButtonDown {
+            clickEvents.append(ClickEvent(time: time, button: 0))
+        }
+        wasLeftButtonDown = isDown
     }
 
     private func stopCursorTracking() {
@@ -275,6 +294,15 @@ final class RecordingController: NSObject, ObservableObject {
         } catch {
             print("Failed to save cursor track: \(error)")
         }
+
+        guard !clickEvents.isEmpty else { return }
+        let clicksURL = videoURL.deletingPathExtension().appendingPathExtension("clicks.json")
+        do {
+            let data = try JSONEncoder().encode(clickEvents)
+            try data.write(to: clicksURL)
+        } catch {
+            print("Failed to save click events: \(error)")
+        }
     }
 
     private func resetCaptureReferences(keepingOutputURL: Bool = false) {
@@ -283,7 +311,9 @@ final class RecordingController: NSObject, ObservableObject {
         startedAt = nil
         elapsed = 0
         cursorTrack = []
+        clickEvents = []
         recordedDisplayID = nil
+        wasLeftButtonDown = false
         if !keepingOutputURL {
             outputURL = nil
         }

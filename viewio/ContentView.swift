@@ -766,6 +766,14 @@ private struct ZoomLane: View {
                 Spacer()
 
                 Button {
+                    model.generateAutoZoomRanges()
+                } label: {
+                    Label("Auto Zoom", systemImage: "wand.and.stars")
+                }
+                .buttonStyle(.borderless)
+                .help("Generate zoom ranges from cursor movement and clicks")
+
+                Button {
                     model.addZoomRange()
                 } label: {
                     Label("Add zoom range", systemImage: "plus")
