@@ -12,11 +12,10 @@ struct viewioApp: App {
     @StateObject private var recorder = RecordingController()
 
     var body: some Scene {
-        WindowGroup("") {
+        WindowGroup("viewio") {
             ContentView()
                 .environmentObject(recorder)
         }
-        .windowStyle(.hiddenTitleBar)
 
         MenuBarExtra(
             isInserted: Binding(

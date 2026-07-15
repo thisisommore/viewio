@@ -42,11 +42,8 @@ struct ContentView: View {
                 )
 
             case let .finished(url):
-                EditorWorkspace(
-                    sourceURL: url,
-                    onNewRecording: recorder.discardRecording
-                )
-                .id(url)
+                EditorWorkspace(sourceURL: url)
+                    .id(url)
 
             case let .failed(message):
                 RecordingStartView(
@@ -58,6 +55,7 @@ struct ContentView: View {
                 )
             }
         }
+        .navigationTitle("viewio")
         .animation(.snappy(duration: 0.28), value: recorder.isRecording)
         .frame(minWidth: 960, minHeight: 650)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -261,22 +259,13 @@ private struct RecordingBar: View {
 
 private struct EditorWorkspace: View {
     @StateObject private var model: EditorModel
-    let onNewRecording: () -> Void
 
-    init(sourceURL: URL, onNewRecording: @escaping () -> Void) {
+    init(sourceURL: URL) {
         _model = StateObject(wrappedValue: EditorModel(sourceURL: sourceURL))
-        self.onNewRecording = onNewRecording
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            EditorHeader(
-                title: model.clipTitle,
-                isExporting: isExporting,
-                onNewRecording: onNewRecording,
-                onExport: model.export
-            )
-
+        Group {
             switch model.loadState {
             case .loading:
                 ProgressView("Preparing recording…")
@@ -295,6 +284,7 @@ private struct EditorWorkspace: View {
                 editor
             }
         }
+        .navigationTitle(model.clipTitle)
         .overlay {
             ExportOverlay(state: model.exportState, dismiss: model.dismissExportMessage)
         }
@@ -320,52 +310,6 @@ private struct EditorWorkspace: View {
 
             ZoomLane(model: model)
                 .frame(height: 86)
-        }
-    }
-
-    private var isExporting: Bool {
-        if case .exporting = model.exportState {
-            true
-        } else {
-            false
-        }
-    }
-}
-
-private struct EditorHeader: View {
-    let title: String
-    let isExporting: Bool
-    let onNewRecording: () -> Void
-    let onExport: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Button(action: onNewRecording) {
-                Label("New recording", systemImage: "record.circle")
-            }
-            .buttonStyle(.borderless)
-
-            Divider()
-                .frame(height: 18)
-
-            Text(title)
-                .font(.system(size: 13, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Spacer()
-
-            Button(action: onExport) {
-                Label("Export", systemImage: "square.and.arrow.up")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(isExporting)
-        }
-        .padding(.horizontal, 18)
-        .frame(height: 46)
-        .background(.bar)
-        .overlay(alignment: .bottom) {
-            Divider()
         }
     }
 }
