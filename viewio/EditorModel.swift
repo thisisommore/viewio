@@ -106,6 +106,29 @@ struct TimelineClipLayout: Identifiable {
     var duration: Double { end - start }
 }
 
+enum InspectorTab: String, CaseIterable, Identifiable {
+    case edit
+    case cursor
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .edit: "Edit"
+        case .cursor: "Cursor"
+        }
+    }
+}
+
+/// Live preview of the custom cursor (UI overlay — CA tool is export-only).
+struct CursorPreviewState: Equatable {
+    var normalizedPosition: CGPoint
+    var style: CursorStyle
+    var size: Double
+    var clickEffect: CursorClickEffect
+    var clickProgress: Double?
+}
+
 @MainActor
 final class EditorModel: ObservableObject {
     enum LoadState: Equatable {
@@ -132,8 +155,14 @@ final class EditorModel: ObservableObject {
     @Published private(set) var zoomRanges: [ZoomRange] = []
     @Published var selectedClipID: UUID?
     @Published var selectedZoomID: UUID?
+    @Published var inspectorTab: InspectorTab = .edit
+    @Published private(set) var cursorSettings: CursorSettings = .default
+    @Published private(set) var hasCursorData = false
+    /// Pixel size of the composed video frame (for letterboxed cursor overlay).
+    @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
 
     private var cursorTrack: [CursorPosition] = []
+    private var processedCursorTrack: [CursorPosition] = []
     private var clickEvents: [ClickEvent] = []
     @Published var isPlaying = false
 
@@ -304,43 +333,172 @@ final class EditorModel: ObservableObject {
         rebuildPreview(preservingPlayhead: true)
     }
 
+    func setCursorEnabled(_ enabled: Bool) {
+        guard cursorSettings.isEnabled != enabled else { return }
+        var settings = cursorSettings
+        settings.isEnabled = enabled
+        cursorSettings = settings
+        // Preview uses a UI overlay; export bakes the cursor offline.
+    }
+
+    func setCursorStyle(_ style: CursorStyle) {
+        guard cursorSettings.style != style else { return }
+        var settings = cursorSettings
+        settings.style = style
+        cursorSettings = settings
+    }
+
+    func setCursorMotion(_ motion: CursorMotionStyle) {
+        guard cursorSettings.motion != motion else { return }
+        var settings = cursorSettings
+        settings.motion = motion
+        cursorSettings = settings
+        refreshProcessedCursorTrack()
+        // Motion also drives zoom focus, so rebuild the player composition.
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setCursorSize(_ size: Double) {
+        let clamped = min(2, max(0.6, size))
+        guard abs(cursorSettings.size - clamped) > 0.001 else { return }
+        var settings = cursorSettings
+        settings.size = clamped
+        cursorSettings = settings
+    }
+
+    func setCursorClickEffect(_ effect: CursorClickEffect) {
+        guard cursorSettings.clickEffect != effect else { return }
+        var settings = cursorSettings
+        settings.clickEffect = effect
+        cursorSettings = settings
+    }
+
+    /// Cursor state for the live player overlay (not baked into AVPlayerItem).
+    func cursorPreview(at time: Double) -> CursorPreviewState? {
+        guard cursorSettings.isEnabled, hasCursorData else { return nil }
+        let renderSize = videoRenderSize
+        guard renderSize.width > 1, renderSize.height > 1 else { return nil }
+
+        let baseTransform = sourceVideoTrack?.preferredTransform ?? .identity
+        let point = displayCursorPoint(at: time, renderSize: renderSize, baseTransform: baseTransform)
+        let normalized = CGPoint(
+            x: point.x / renderSize.width,
+            y: point.y / renderSize.height
+        )
+
+        var clickProgress: Double?
+        if cursorSettings.clickEffect != .none {
+            let effectDuration = cursorSettings.clickEffect == .pulse ? 0.28 : 0.45
+            for click in clickEvents {
+                let dt = time - click.time
+                if dt >= 0, dt <= effectDuration {
+                    clickProgress = dt / effectDuration
+                    break
+                }
+            }
+        }
+
+        return CursorPreviewState(
+            normalizedPosition: normalized,
+            style: cursorSettings.style,
+            size: cursorSettings.size,
+            clickEffect: cursorSettings.clickEffect,
+            clickProgress: clickProgress
+        )
+    }
+
     func generateAutoZoomRanges() {
-        guard !cursorTrack.isEmpty else { return }
+        guard !cursorTrack.isEmpty, duration > 0.25 else { return }
 
         var candidates: [ZoomRange] = []
 
         for click in clickEvents {
             // Wider windows so entry/exit can ease over ~0.85s without feeling rushed.
             let start = max(0, click.time - 0.9)
-            let end = min(duration, click.time + 1.4)
+            let end = min(duration, max(start + 1.2, click.time + 1.4))
             candidates.append(ZoomRange(start: start, end: end))
         }
 
         for pause in findPauseSegments() {
             let start = max(0, pause.start - 0.5)
-            let end = min(duration, pause.end + 0.5)
+            let end = min(duration, max(start + 1.0, pause.end + 0.5))
             candidates.append(ZoomRange(start: start, end: end))
         }
 
-        let merged = mergeZoomRanges(candidates)
+        // Fallback: if there are no clicks/pauses, still place zooms on low-motion dwells.
+        if candidates.isEmpty {
+            candidates.append(contentsOf: findDwellZoomCandidates())
+        }
 
-        zoomRanges = merged.compactMap { range in
+        let merged = mergeZoomRanges(candidates)
+            .map { clampZoomRange($0, in: duration) }
+            .filter { $0.end - $0.start >= 0.6 }
+
+        let built = merged.compactMap { range -> ZoomRange? in
             let positions = cursorPositions(in: range.start...range.end)
             let spread = spatialSpread(of: positions)
-            guard spread <= 0.6 else { return nil }
-            let amount = min(2.5, max(1.2, 1.2 + (1 - spread) * 1.3))
+            // Allow slightly larger spreads so auto-zoom still fires on normal mouse use.
+            guard spread <= 0.85 else { return nil }
+            let amount = min(2.2, max(1.25, 1.25 + (1 - spread) * 1.1))
             return ZoomRange(
                 id: range.id,
                 start: range.start,
                 end: range.end,
                 amount: amount,
-                entryAnimation: range.entryAnimation,
-                exitAnimation: range.exitAnimation
+                entryAnimation: .smooth,
+                exitAnimation: .smooth
             )
         }
 
-        selectedZoomID = nil
+        // Cap count so the compositor is not flooded with transform ramps.
+        zoomRanges = Array(built.prefix(24))
+        selectedZoomID = zoomRanges.first?.id
         rebuildPreview(preservingPlayhead: true)
+    }
+
+    private func clampZoomRange(_ range: ZoomRange, in duration: Double) -> ZoomRange {
+        var start = min(max(0, range.start), max(0, duration - 0.25))
+        var end = min(duration, max(start + 0.25, range.end))
+        if end - start < 0.6 {
+            end = min(duration, start + 0.6)
+            start = max(0, end - 0.6)
+        }
+        return ZoomRange(
+            id: range.id,
+            start: start,
+            end: end,
+            amount: range.amount,
+            entryAnimation: range.entryAnimation,
+            exitAnimation: range.exitAnimation
+        )
+    }
+
+    /// When there are no clicks, invent zoom windows around slow cursor segments.
+    private func findDwellZoomCandidates() -> [ZoomRange] {
+        let pauses = findPauseSegments()
+        if !pauses.isEmpty {
+            return pauses.map { pause in
+                ZoomRange(
+                    start: max(0, pause.start - 0.4),
+                    end: min(duration, pause.end + 0.8)
+                )
+            }
+        }
+
+        // Last resort: a few evenly spaced zooms along the track so Auto Zoom always does something.
+        guard duration > 2 else { return [] }
+        var result: [ZoomRange] = []
+        let count = min(4, max(1, Int(duration / 8)))
+        for index in 0..<count {
+            let center = duration * (Double(index) + 0.5) / Double(count)
+            result.append(
+                ZoomRange(
+                    start: max(0, center - 1.1),
+                    end: min(duration, center + 1.1)
+                )
+            )
+        }
+        return result
     }
 
     func export() {
@@ -419,6 +577,12 @@ final class EditorModel: ObservableObject {
             sourceAudioTracks = audioTracks
             cursorTrack = loadCursorTrack()
             clickEvents = loadClickEvents()
+            hasCursorData = !cursorTrack.isEmpty
+            refreshProcessedCursorTrack()
+            // Default custom cursor on when we have track data (system cursor is hidden on record).
+            var settings = cursorSettings
+            settings.isEnabled = hasCursorData
+            cursorSettings = settings
             clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
             selectedClipID = clips.first?.id
             duration = seconds
@@ -430,13 +594,15 @@ final class EditorModel: ObservableObject {
     }
 
     private func rebuildPreview(preservingPlayhead: Bool) {
-        guard let build = makeComposition() else { return }
+        // Core Animation cursor tool is export-only — never attach it to AVPlayerItem.
+        guard let build = makeComposition(includeCursorOverlay: false) else { return }
         let previousPlayhead = preservingPlayhead ? min(playhead, build.duration) : 0
 
         let item = AVPlayerItem(asset: build.composition)
         item.videoComposition = build.videoComposition
         player.replaceCurrentItem(with: item)
         duration = build.duration
+        videoRenderSize = build.renderSize
         playhead = previousPlayhead
         isPlaying = false
         player.pause()
@@ -446,7 +612,14 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    private func makeComposition() -> (composition: AVMutableComposition, videoComposition: AVMutableVideoComposition, duration: Double)? {
+    private func makeComposition(
+        includeCursorOverlay: Bool
+    ) -> (
+        composition: AVMutableComposition,
+        videoComposition: AVMutableVideoComposition,
+        duration: Double,
+        renderSize: CGSize
+    )? {
         guard let sourceVideoTrack else { return nil }
 
         let composition = AVMutableComposition()
@@ -494,22 +667,33 @@ final class EditorModel: ObservableObject {
         let videoComposition = makeVideoComposition(
             compositionTrack: compositionVideoTrack,
             sourceTrack: sourceVideoTrack,
-            duration: cursor
+            duration: cursor,
+            includeCursorOverlay: includeCursorOverlay
         )
-        return (composition, videoComposition, max(0, cursor.seconds))
+        return (
+            composition,
+            videoComposition,
+            max(0, cursor.seconds),
+            videoComposition.renderSize
+        )
     }
 
     private func makeVideoComposition(
         compositionTrack: AVCompositionTrack,
         sourceTrack: AVAssetTrack,
-        duration: CMTime
+        duration: CMTime,
+        includeCursorOverlay: Bool
     ) -> AVMutableVideoComposition {
         let naturalSize = sourceTrack.naturalSize
         let transformedSize = naturalSize.applying(sourceTrack.preferredTransform)
+        // Even dimensions avoid rare VRP failures with some decoders/compositors.
+        let rawWidth = max(2, abs(transformedSize.width))
+        let rawHeight = max(2, abs(transformedSize.height))
         let renderSize = CGSize(
-            width: max(1, abs(transformedSize.width)),
-            height: max(1, abs(transformedSize.height))
+            width: (rawWidth / 2).rounded(.down) * 2,
+            height: (rawHeight / 2).rounded(.down) * 2
         )
+        videoRenderSize = renderSize
 
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = renderSize
@@ -531,7 +715,81 @@ final class EditorModel: ObservableObject {
 
         instruction.layerInstructions = [layerInstruction]
         videoComposition.instructions = [instruction]
+
+        // AVVideoCompositionCoreAnimationTool is offline-only (export). Using it on
+        // AVPlayerItem crashes with NSInvalidArgumentException.
+        if includeCursorOverlay, cursorSettings.isEnabled, hasCursorData {
+            let clicks = clickEvents
+            CursorOverlayBuilder.apply(
+                to: videoComposition,
+                settings: cursorSettings,
+                processedTrack: processedCursorTrack,
+                clickEvents: clicks,
+                renderSize: renderSize,
+                duration: duration.seconds,
+                displayPosition: { [weak self] time in
+                    guard let self else {
+                        return CGPoint(x: renderSize.width / 2, y: renderSize.height / 2)
+                    }
+                    return self.displayCursorPoint(at: time, renderSize: renderSize, baseTransform: baseTransform)
+                }
+            )
+        }
+
         return videoComposition
+    }
+
+    private func refreshProcessedCursorTrack() {
+        processedCursorTrack = CursorMotion.process(
+            track: cursorTrack,
+            motion: cursorSettings.motion
+        )
+    }
+
+    /// Final on-screen cursor point in layer coordinates (top-left origin via geometryFlipped).
+    private func displayCursorPoint(
+        at time: Double,
+        renderSize: CGSize,
+        baseTransform: CGAffineTransform
+    ) -> CGPoint {
+        let normalized = CursorMotion.position(
+            at: time,
+            in: processedCursorTrack,
+            motion: cursorSettings.motion
+        )
+        let sourcePoint = CGPoint(
+            x: normalized.x * renderSize.width,
+            y: normalized.y * renderSize.height
+        )
+
+        // Match transformForZoom: preferred orientation first, then zoom.
+        let zoom = activeZoomTransform(at: time, renderSize: renderSize)
+        let transformed = sourcePoint.applying(zoom.concatenating(baseTransform))
+        return CGPoint(
+            x: min(renderSize.width, max(0, transformed.x)),
+            y: min(renderSize.height, max(0, transformed.y))
+        )
+    }
+
+    private func activeZoomTransform(at time: Double, renderSize: CGSize) -> CGAffineTransform {
+        guard let range = zoomRanges.first(where: { time >= $0.start && time <= $0.end }) else {
+            return .identity
+        }
+        let rangeDuration = max(0.001, range.end - range.start)
+        let transition = transitionDuration(for: range, totalDuration: rangeDuration)
+        let scale = zoomScale(at: time, range: range, transition: transition)
+        // Zoom focus follows the processed cursor so motion style and framing stay in sync.
+        let center = CursorMotion.position(
+            at: time,
+            in: processedCursorTrack,
+            motion: cursorSettings.motion
+        )
+        return zoomTransform(
+            renderSize: renderSize,
+            scale: scale,
+            center: center,
+            targetAmount: CGFloat(min(3, max(1, range.amount)))
+        )
     }
 
     /// Builds a transform that scales the frame and keeps the focus point at the
@@ -542,7 +800,10 @@ final class EditorModel: ObservableObject {
         center: CGPoint,
         targetAmount: CGFloat
     ) -> CGAffineTransform {
-        guard scale > 1.0001 else {
+        let safeScale = CGFloat(min(3, max(1, Double(scale))))
+        guard safeScale > 1.0001,
+              renderSize.width > 1,
+              renderSize.height > 1 else {
             return .identity
         }
 
@@ -550,57 +811,36 @@ final class EditorModel: ObservableObject {
         let midY = renderSize.height / 2
 
         // Keep the scaled content covering the full frame (no black bars).
-        let inset = 0.5 / Double(scale)
-        let clampedX = min(1 - inset, max(inset, Double(center.x)))
-        let clampedY = min(1 - inset, max(inset, Double(center.y)))
+        let inset = min(0.49, 0.5 / Double(safeScale))
+        let clampedX = min(1 - inset, max(inset, Double(center.x.isFinite ? center.x : 0.5)))
+        let clampedY = min(1 - inset, max(inset, Double(center.y.isFinite ? center.y : 0.5)))
         let anchorX = CGFloat(clampedX) * renderSize.width
         let anchorY = CGFloat(clampedY) * renderSize.height
 
         // Animate pan with zoom-in so scale=1 stays identity, and at full zoom
         // the focus point sits at the frame center.
-        let amount = max(targetAmount, scale)
-        let panProgress = min(1, max(0, (scale - 1) / max(0.0001, amount - 1)))
+        let amount = max(CGFloat(min(3, max(1, Double(targetAmount)))), safeScale)
+        let panProgress = min(1, max(0, (safeScale - 1) / max(0.0001, amount - 1)))
 
         // T * p = scale * p + (1 - scale) * anchor + (mid - anchor) * panProgress
-        let tx = (1 - scale) * anchorX + (midX - anchorX) * panProgress
-        let ty = (1 - scale) * anchorY + (midY - anchorY) * panProgress
-        return CGAffineTransform(a: scale, b: 0, c: 0, d: scale, tx: tx, ty: ty)
+        let tx = (1 - safeScale) * anchorX + (midX - anchorX) * panProgress
+        let ty = (1 - safeScale) * anchorY + (midY - anchorY) * panProgress
+        return CGAffineTransform(a: safeScale, b: 0, c: 0, d: safeScale, tx: tx, ty: ty)
     }
 
     /// Cursor position in normalized video coordinates (origin top-left, 0...1).
     private func cursorPosition(at time: Double) -> CGPoint {
-        guard !cursorTrack.isEmpty else { return CGPoint(x: 0.5, y: 0.5) }
-
-        let sample: CursorPosition
-        if let index = cursorTrack.firstIndex(where: { $0.time >= time }) {
-            if index == 0 {
-                sample = cursorTrack[0]
-            } else {
-                let previous = cursorTrack[index - 1]
-                let next = cursorTrack[index]
-                let t = (time - previous.time) / max(0.001, next.time - previous.time)
-                sample = CursorPosition(
-                    time: time,
-                    x: previous.x + (next.x - previous.x) * t,
-                    y: previous.y + (next.y - previous.y) * t
-                )
-            }
-        } else if let last = cursorTrack.last {
-            sample = last
-        } else {
-            return CGPoint(x: 0.5, y: 0.5)
+        if !processedCursorTrack.isEmpty {
+            return CursorMotion.position(
+                at: time,
+                in: processedCursorTrack,
+                motion: cursorSettings.motion
+            )
         }
-
-        return videoPoint(fromTrack: sample)
-    }
-
-    /// Track points are stored in Cocoa space (origin bottom-left). Video frames
-    /// use top-left origin, so Y is flipped when applying zoom.
-    private func videoPoint(fromTrack sample: CursorPosition) -> CGPoint {
-        CGPoint(
-            x: min(1, max(0, sample.x)),
-            y: min(1, max(0, 1 - sample.y))
-        )
+        // Fallback when motion pipeline has not run yet.
+        guard !cursorTrack.isEmpty else { return CGPoint(x: 0.5, y: 0.5) }
+        let raw = CursorMotion.process(track: cursorTrack, motion: .natural)
+        return CursorMotion.position(at: time, in: raw, motion: .natural)
     }
 
     private func findPauseSegments() -> [(start: Double, end: Double)] {
@@ -710,77 +950,114 @@ final class EditorModel: ObservableObject {
         renderSize: CGSize,
         duration: Double
     ) {
-        // Sample often enough that the zoom focus tracks cursor motion smoothly.
-        let sampleInterval = 1.0 / 60.0
+        guard duration > 0, !zoomRanges.isEmpty else { return }
 
-        for range in zoomRanges.sorted(by: { $0.start < $1.start }) {
-            let start = min(duration, max(0, range.start))
-            let end = min(duration, max(start, range.end))
-            guard end > start else { continue }
+        // Build one monotonic keyframe list, then emit non-overlapping ramps.
+        // Flooding AVFoundation with 60fps ramps + conflicting setTransform calls
+        // triggers VRP err=-12852 and breaks playback.
+        let timescale: CMTimeScale = 60_000
+        let sampleInterval = 1.0 / 20.0
+        var keyframes: [(time: Double, transform: CGAffineTransform)] = [
+            (0, sanitizedTransform(baseTransform))
+        ]
 
+        let sorted = zoomRanges
+            .map { clampZoomRange($0, in: duration) }
+            .filter { $0.end - $0.start > 0.05 }
+            .sorted { $0.start < $1.start }
+
+        for range in sorted {
+            let start = range.start
+            let end = range.end
             let transition = transitionDuration(for: range, totalDuration: end - start)
-            var previousTime = start
-            var previousTransform = transformForZoom(
-                at: start,
-                range: range,
-                transition: transition,
-                baseTransform: baseTransform,
-                renderSize: renderSize
-            )
 
-            // Explicit keyframe at range start so the prior identity (or prior
-            // range) transitions cleanly into this zoom.
-            layerInstruction.setTransform(
-                previousTransform,
-                at: CMTime(seconds: start, preferredTimescale: 600)
-            )
+            // Gap before this zoom: hold base transform.
+            if let last = keyframes.last, last.time < start - 0.0005 {
+                appendKeyframe(&keyframes, time: start, transform: baseTransform)
+            }
 
-            var sampleTime = start + sampleInterval
-            while sampleTime < end {
-                let currentTransform = transformForZoom(
+            var sampleTime = start
+            while sampleTime < end - 0.0005 {
+                let transform = transformForZoom(
                     at: sampleTime,
                     range: range,
                     transition: transition,
                     baseTransform: baseTransform,
                     renderSize: renderSize
                 )
-                let startTime = CMTime(seconds: previousTime, preferredTimescale: 600)
-                let endTime = CMTime(seconds: sampleTime, preferredTimescale: 600)
-                layerInstruction.setTransformRamp(
-                    fromStart: previousTransform,
-                    toEnd: currentTransform,
-                    timeRange: CMTimeRange(start: startTime, end: endTime)
-                )
-
-                previousTransform = currentTransform
-                previousTime = sampleTime
+                appendKeyframe(&keyframes, time: sampleTime, transform: transform)
                 sampleTime += sampleInterval
             }
 
-            let finalTransform = transformForZoom(
+            let endTransform = transformForZoom(
                 at: end,
                 range: range,
                 transition: transition,
                 baseTransform: baseTransform,
                 renderSize: renderSize
             )
-            let startTime = CMTime(seconds: previousTime, preferredTimescale: 600)
-            let endTime = CMTime(seconds: end, preferredTimescale: 600)
-            layerInstruction.setTransformRamp(
-                fromStart: previousTransform,
-                toEnd: finalTransform,
-                timeRange: CMTimeRange(start: startTime, end: endTime)
-            )
+            appendKeyframe(&keyframes, time: end, transform: endTransform)
 
-            // Hold identity after the zoom fully exits so later segments don't
-            // inherit a residual pan/scale.
-            if abs(zoomScale(at: end, range: range, transition: transition) - 1) < 0.001 {
-                layerInstruction.setTransform(
-                    baseTransform,
-                    at: CMTime(seconds: end, preferredTimescale: 600)
-                )
+            // Settle back to base after exit so later content is stable.
+            let settle = min(duration, end + 1.0 / 30.0)
+            appendKeyframe(&keyframes, time: settle, transform: baseTransform)
+        }
+
+        if let last = keyframes.last, last.time < duration {
+            appendKeyframe(&keyframes, time: duration, transform: baseTransform)
+        }
+
+        for index in 0..<(keyframes.count - 1) {
+            let from = keyframes[index]
+            let to = keyframes[index + 1]
+            let delta = to.time - from.time
+            guard delta > 0.0008 else { continue }
+
+            let startTime = CMTime(seconds: from.time, preferredTimescale: timescale)
+            let endTime = CMTime(seconds: to.time, preferredTimescale: timescale)
+            let timeRange = CMTimeRange(start: startTime, end: endTime)
+            guard timeRange.duration.isValid,
+                  timeRange.duration.seconds > 0,
+                  !timeRange.duration.seconds.isNaN else {
+                continue
+            }
+
+            layerInstruction.setTransformRamp(
+                fromStart: from.transform,
+                toEnd: to.transform,
+                timeRange: timeRange
+            )
+        }
+    }
+
+    private func appendKeyframe(
+        _ keyframes: inout [(time: Double, transform: CGAffineTransform)],
+        time: Double,
+        transform: CGAffineTransform
+    ) {
+        let safe = sanitizedTransform(transform)
+        if let last = keyframes.last {
+            if abs(last.time - time) < 0.0005 {
+                keyframes[keyframes.count - 1] = (time, safe)
+                return
+            }
+            if last.time > time {
+                return
             }
         }
+        keyframes.append((time, safe))
+    }
+
+    private func sanitizedTransform(_ transform: CGAffineTransform) -> CGAffineTransform {
+        let values = [transform.a, transform.b, transform.c, transform.d, transform.tx, transform.ty]
+        guard values.allSatisfy(\.isFinite) else {
+            return .identity
+        }
+        // Reject degenerate scales that can crash the video render pipeline.
+        guard abs(transform.a) > 0.01, abs(transform.d) > 0.01 else {
+            return .identity
+        }
+        return transform
     }
 
     private func transformForZoom(
@@ -798,7 +1075,8 @@ final class EditorModel: ObservableObject {
             center: center,
             targetAmount: CGFloat(min(3, max(1, range.amount)))
         )
-        return baseTransform.concatenating(zoom)
+        // Apply preferred orientation first, then zoom in the oriented frame.
+        return sanitizedTransform(zoom.concatenating(baseTransform))
     }
 
     private func applyTransformAnimation(
@@ -850,7 +1128,8 @@ final class EditorModel: ObservableObject {
     }
 
     private func startExport(to outputURL: URL) {
-        guard let build = makeComposition() else {
+        // Bake cursor with Core Animation tool — valid for offline export only.
+        guard let build = makeComposition(includeCursorOverlay: true) else {
             exportState = .failed("Unable to prepare this recording for export.")
             return
         }

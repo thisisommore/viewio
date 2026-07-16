@@ -152,8 +152,10 @@ final class RecordingController: NSObject, ObservableObject {
         configuration.height = CGDisplayPixelsHigh(display.displayID)
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         configuration.queueDepth = 5
-        configuration.showsCursor = true
-        configuration.showMouseClicks = true
+        // Hide the system cursor in the captured frames so the editor can redraw
+        // a custom, animated cursor from the separately tracked path.
+        configuration.showsCursor = false
+        configuration.showMouseClicks = false
         configuration.capturesAudio = captureSystemAudio
         configuration.excludesCurrentProcessAudio = true
         configuration.captureMicrophone = captureMicrophone

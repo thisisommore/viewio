@@ -337,7 +337,7 @@ private struct EditorWorkspace: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 ClipInspector(model: model)
-                    .frame(width: 208)
+                    .frame(width: 268)
             }
             .frame(minHeight: 330)
 
@@ -375,9 +375,14 @@ private struct VideoPreview: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PlayerView(player: model.player)
-                .background(Color.black)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ZStack {
+                PlayerView(player: model.player)
+                    .background(Color.black)
+
+                // Live cursor overlay — Core Animation tool cannot run on AVPlayerItem.
+                CursorPlayerOverlay(model: model)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             HStack(spacing: 8) {
                 Button {
@@ -427,33 +432,145 @@ private struct VideoPreview: View {
     }
 }
 
+/// Draws the custom cursor on top of the player, letterboxed to match the video.
+private struct CursorPlayerOverlay: View {
+    @ObservedObject var model: EditorModel
+
+    var body: some View {
+        GeometryReader { geometry in
+            let container = geometry.size
+            let render = model.videoRenderSize
+            let videoRect = letterboxedRect(aspect: render, in: container)
+
+            if let state = model.cursorPreview(at: model.playhead) {
+                let cursorSize = 28 * state.size
+                let hotspot = CursorArtwork.hotspot(for: state.style)
+                let tip = CGPoint(
+                    x: videoRect.minX + state.normalizedPosition.x * videoRect.width,
+                    y: videoRect.minY + state.normalizedPosition.y * videoRect.height
+                )
+                // SwiftUI `.position` anchors the view center; shift so the hotspot is at `tip`.
+                let center = CGPoint(
+                    x: tip.x + cursorSize * (0.5 - hotspot.x),
+                    y: tip.y + cursorSize * (0.5 - hotspot.y)
+                )
+
+                ZStack {
+                    if let progress = state.clickProgress, state.clickEffect != .none {
+                        ClickOverlayShape(effect: state.clickEffect, progress: progress)
+                            .frame(width: cursorSize * 3.2, height: cursorSize * 3.2)
+                            .position(tip)
+                    }
+
+                    Image(nsImage: CursorArtwork.image(style: state.style, scale: 2))
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: cursorSize, height: cursorSize)
+                        .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
+                        .position(center)
+                }
+                .allowsHitTesting(false)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func letterboxedRect(aspect: CGSize, in container: CGSize) -> CGRect {
+        guard aspect.width > 0, aspect.height > 0, container.width > 0, container.height > 0 else {
+            return CGRect(origin: .zero, size: container)
+        }
+        return AVMakeRect(
+            aspectRatio: aspect,
+            insideRect: CGRect(origin: .zero, size: container)
+        )
+    }
+}
+
+private struct ClickOverlayShape: View {
+    let effect: CursorClickEffect
+    let progress: Double
+
+    var body: some View {
+        Canvas { context, size in
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let t = min(1, max(0, progress))
+            switch effect {
+            case .none:
+                break
+            case .ripple:
+                let radius = 6 + CGFloat(t) * min(size.width, size.height) * 0.42
+                var path = Path()
+                path.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+                context.stroke(path, with: .color(.accentColor.opacity(0.85 * (1 - t))), lineWidth: 2)
+            case .ring:
+                let radius = 8 + CGFloat(t) * min(size.width, size.height) * 0.35
+                var path = Path()
+                path.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+                context.stroke(path, with: .color(.white.opacity(0.9 * (1 - t))), lineWidth: 2.5)
+            case .pulse:
+                let scale = 1 + CGFloat(sin(t * .pi)) * 0.85
+                let radius = 8 * scale
+                var path = Path()
+                path.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+                context.fill(path, with: .color(.accentColor.opacity(0.35 * (1 - t))))
+                context.stroke(path, with: .color(.accentColor.opacity(0.9 * (1 - t))), lineWidth: 1.5)
+            }
+        }
+    }
+}
+
 private struct ClipInspector: View {
     @ObservedObject var model: EditorModel
 
     private let speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            if let range = model.selectedZoomRange {
-                zoomHeader(range: range)
-                zoomControls(for: range)
-            } else if let selectedClip = model.selectedClip {
-                inspectorHeader(title: "CLIP INSPECTOR", subtitle: "Playback speed")
-                clipControls(for: selectedClip)
-            } else {
-                inspectorHeader(title: "CLIP INSPECTOR", subtitle: "Select a clip")
-                Text("Click a segment in the V1 lane to adjust it independently.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            Picker("Inspector", selection: $model.inspectorTab) {
+                ForEach(InspectorTab.allCases) { tab in
+                    Text(tab.title).tag(tab)
+                }
             }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
 
-            Spacer()
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    switch model.inspectorTab {
+                    case .edit:
+                        editTab
+                    case .cursor:
+                        CursorInspectorPanel(model: model)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
-        .padding(16)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor))
         .overlay(alignment: .leading) {
             Divider()
+        }
+    }
+
+    @ViewBuilder
+    private var editTab: some View {
+        if let range = model.selectedZoomRange {
+            zoomHeader(range: range)
+            zoomControls(for: range)
+        } else if let selectedClip = model.selectedClip {
+            inspectorHeader(title: "CLIP INSPECTOR", subtitle: "Playback speed")
+            clipControls(for: selectedClip)
+        } else {
+            inspectorHeader(title: "CLIP INSPECTOR", subtitle: "Select a clip")
+            Text("Click a segment in the V1 lane to adjust it independently.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -942,6 +1059,407 @@ private struct ZoomRangeBlock: View {
             .onEnded { _ in
                 resizeStart = nil
             }
+    }
+}
+
+// MARK: - Cursor inspector
+
+private struct CursorInspectorPanel: View {
+    @ObservedObject var model: EditorModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("CURSOR")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.75)
+                        .foregroundStyle(.secondary)
+                    Text("Style & motion")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                Spacer()
+                Toggle(
+                    "On",
+                    isOn: Binding(
+                        get: { model.cursorSettings.isEnabled },
+                        set: model.setCursorEnabled
+                    )
+                )
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+                .disabled(!model.hasCursorData)
+                .help(model.hasCursorData ? "Show custom cursor" : "No cursor track for this recording")
+            }
+
+            if !model.hasCursorData {
+                missingTrackBanner
+            } else {
+                Text("Recordings hide the system cursor so you can restyle movement after capture.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                sectionLabel("Appearance")
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 72), spacing: 8)],
+                    spacing: 8
+                ) {
+                    ForEach(CursorStyle.allCases) { style in
+                        CursorStyleCard(
+                            style: style,
+                            isSelected: model.cursorSettings.style == style,
+                            isEnabled: model.cursorSettings.isEnabled
+                        ) {
+                            model.setCursorStyle(style)
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Size")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(String(format: "%.0f%%", model.cursorSettings.size * 100))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { model.cursorSettings.size },
+                            set: model.setCursorSize
+                        ),
+                        in: 0.6...2.0,
+                        step: 0.05
+                    )
+                    .disabled(!model.cursorSettings.isEnabled)
+                }
+
+                sectionLabel("Motion")
+                Text("How the pointer eases when it changes position.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                VStack(spacing: 8) {
+                    ForEach(CursorMotionStyle.allCases) { motion in
+                        CursorMotionCard(
+                            motion: motion,
+                            isSelected: model.cursorSettings.motion == motion,
+                            isEnabled: model.cursorSettings.isEnabled
+                        ) {
+                            model.setCursorMotion(motion)
+                        }
+                    }
+                }
+
+                sectionLabel("Click effect")
+                LazyVGrid(
+                    columns: [GridItem(.flexible()), GridItem(.flexible())],
+                    spacing: 8
+                ) {
+                    ForEach(CursorClickEffect.allCases) { effect in
+                        CursorClickCard(
+                            effect: effect,
+                            isSelected: model.cursorSettings.clickEffect == effect,
+                            isEnabled: model.cursorSettings.isEnabled
+                        ) {
+                            model.setCursorClickEffect(effect)
+                        }
+                    }
+                }
+            }
+        }
+        .opacity(model.hasCursorData && !model.cursorSettings.isEnabled ? 0.85 : 1)
+    }
+
+    private var missingTrackBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("No cursor data", systemImage: "cursorarrow.slash")
+                .font(.system(size: 13, weight: .semibold))
+            Text("New recordings track the pointer automatically. Re-record to unlock styles, motion, and click effects.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func sectionLabel(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 10, weight: .semibold))
+            .tracking(0.7)
+            .foregroundStyle(.secondary)
+            .padding(.top, 4)
+    }
+}
+
+private struct CursorStyleCard: View {
+    let style: CursorStyle
+    let isSelected: Bool
+    let isEnabled: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(nsColor: .controlBackgroundColor),
+                                    Color.primary.opacity(0.06)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    CursorStylePreview(style: style)
+                        .frame(width: 36, height: 36)
+                }
+                .frame(height: 52)
+
+                Text(style.title)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+            }
+            .padding(6)
+            .background {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.05))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(isSelected ? Color.accentColor : Color.primary.opacity(0.08), lineWidth: isSelected ? 1.5 : 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.45)
+        .help(style.subtitle)
+    }
+}
+
+private struct CursorStylePreview: View {
+    let style: CursorStyle
+
+    var body: some View {
+        Image(nsImage: CursorArtwork.image(style: style, scale: 2))
+            .resizable()
+            .interpolation(.high)
+            .aspectRatio(contentMode: .fit)
+            .shadow(color: .black.opacity(0.18), radius: 1, y: 0.5)
+    }
+}
+
+private struct CursorMotionCard: View {
+    let motion: CursorMotionStyle
+    let isSelected: Bool
+    let isEnabled: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 10) {
+                MotionDemoView(motion: motion)
+                    .frame(width: 72, height: 40)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.primary.opacity(0.05))
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(motion.title)
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(motion.subtitle)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                        .imageScale(.small)
+                }
+            }
+            .padding(8)
+            .background {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.04))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.8) : Color.primary.opacity(0.06), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+
+/// Tiny looping path demo so motion styles are easy to compare.
+private struct MotionDemoView: View {
+    let motion: CursorMotionStyle
+
+    var body: some View {
+        // Qualify SwiftUI.TimelineView — this file also defines a timeline lane view.
+        SwiftUI.TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let cycle = demoProgress(at: t)
+            Canvas { context, size in
+                let path = demoPath(in: size)
+                context.stroke(
+                    path,
+                    with: .color(.secondary.opacity(0.25)),
+                    style: StrokeStyle(lineWidth: 1, dash: [3, 3])
+                )
+                let point = pointOnDemoPath(progress: cycle, in: size)
+                let radius: CGFloat = 4
+                let rect = CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)
+                context.fill(Path(ellipseIn: rect), with: .color(.accentColor))
+                context.stroke(Path(ellipseIn: rect), with: .color(.white.opacity(0.9)), lineWidth: 1)
+            }
+        }
+        .padding(4)
+    }
+
+    private func demoProgress(at time: TimeInterval) -> CGFloat {
+        let period: Double
+        switch motion {
+        case .precise: period = 1.1
+        case .natural: period = 1.35
+        case .smooth: period = 1.7
+        case .fluid: period = 2.1
+        case .cinematic: period = 2.6
+        }
+        let raw = time.truncatingRemainder(dividingBy: period) / period
+        // Triangle wave so the dot travels forth and back.
+        let triangle = raw < 0.5 ? raw * 2 : (1 - raw) * 2
+        switch motion {
+        case .precise:
+            // Quantize to show steppy tracking.
+            return CGFloat((triangle * 8).rounded() / 8)
+        case .natural:
+            return CGFloat(triangle)
+        case .smooth:
+            return CGFloat(triangle * triangle * (3 - 2 * triangle))
+        case .fluid:
+            let t = triangle
+            return CGFloat(t * t * t * (t * (t * 6 - 15) + 10))
+        case .cinematic:
+            // Slow ease with a soft overshoot illusion near the end.
+            let t = triangle
+            let eased = t * t * t * (t * (t * 6 - 15) + 10)
+            return CGFloat(min(1, eased * 1.04))
+        }
+    }
+
+    private func demoPath(in size: CGSize) -> Path {
+        var path = Path()
+        let inset: CGFloat = 8
+        path.move(to: CGPoint(x: inset, y: size.height - inset))
+        path.addQuadCurve(
+            to: CGPoint(x: size.width - inset, y: inset),
+            control: CGPoint(x: size.width * 0.55, y: size.height * 0.95)
+        )
+        return path
+    }
+
+    private func pointOnDemoPath(progress: CGFloat, in size: CGSize) -> CGPoint {
+        let inset: CGFloat = 8
+        let start = CGPoint(x: inset, y: size.height - inset)
+        let end = CGPoint(x: size.width - inset, y: inset)
+        let control = CGPoint(x: size.width * 0.55, y: size.height * 0.95)
+        let t = min(1, max(0, progress))
+        let u = 1 - t
+        // Quadratic Bezier.
+        return CGPoint(
+            x: u * u * start.x + 2 * u * t * control.x + t * t * end.x,
+            y: u * u * start.y + 2 * u * t * control.y + t * t * end.y
+        )
+    }
+}
+
+private struct CursorClickCard: View {
+    let effect: CursorClickEffect
+    let isSelected: Bool
+    let isEnabled: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(spacing: 6) {
+                ClickEffectDemo(effect: effect)
+                    .frame(height: 36)
+                Text(effect.title)
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity)
+            .background {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.04))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(isSelected ? Color.accentColor : Color.primary.opacity(0.06), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+
+private struct ClickEffectDemo: View {
+    let effect: CursorClickEffect
+
+    var body: some View {
+        SwiftUI.TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+            let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.4) / 1.4
+            Canvas { context, size in
+                let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                // Cursor dot
+                let cursor = CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)
+                context.fill(Path(ellipseIn: cursor), with: .color(.primary.opacity(0.85)))
+
+                guard effect != .none else { return }
+                let burst = min(1, max(0, (phase - 0.15) / 0.55))
+                guard burst > 0, burst < 1 else { return }
+
+                switch effect {
+                case .none:
+                    break
+                case .ripple:
+                    let radius = 4 + CGFloat(burst) * 14
+                    let opacity = 0.75 * (1 - burst)
+                    var circle = Path()
+                    circle.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+                    context.stroke(circle, with: .color(.accentColor.opacity(opacity)), lineWidth: 1.5)
+                case .ring:
+                    let radius = 6 + CGFloat(burst) * 10
+                    var circle = Path()
+                    circle.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+                    context.stroke(circle, with: .color(.white.opacity(0.85 * (1 - burst))), lineWidth: 2)
+                    context.stroke(circle, with: .color(.primary.opacity(0.35 * (1 - burst))), lineWidth: 1)
+                case .pulse:
+                    let scale = 1 + CGFloat(sin(burst * .pi)) * 0.7
+                    let radius = 5 * scale
+                    var circle = Path()
+                    circle.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+                    context.fill(circle, with: .color(.accentColor.opacity(0.35 * (1 - burst))))
+                    context.stroke(circle, with: .color(.accentColor.opacity(0.9 * (1 - burst))), lineWidth: 1.5)
+                }
+            }
+        }
     }
 }
 
