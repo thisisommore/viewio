@@ -526,33 +526,73 @@ final class EditorModel: ObservableObject {
         return videoComposition
     }
 
+    /// Builds a transform that scales the frame and keeps the focus point at the
+    /// viewport center. `center` is normalized video space (origin top-left).
     private func zoomTransform(
         renderSize: CGSize,
         scale: CGFloat,
-        center: CGPoint
+        center: CGPoint,
+        targetAmount: CGFloat
     ) -> CGAffineTransform {
-        let anchorX = center.x * renderSize.width
-        let anchorY = center.y * renderSize.height
-        return CGAffineTransform(translationX: (1 - scale) * anchorX, y: (1 - scale) * anchorY)
-            .scaledBy(x: scale, y: scale)
+        guard scale > 1.0001 else {
+            return .identity
+        }
+
+        let midX = renderSize.width / 2
+        let midY = renderSize.height / 2
+
+        // Keep the scaled content covering the full frame (no black bars).
+        let inset = 0.5 / Double(scale)
+        let clampedX = min(1 - inset, max(inset, Double(center.x)))
+        let clampedY = min(1 - inset, max(inset, Double(center.y)))
+        let anchorX = CGFloat(clampedX) * renderSize.width
+        let anchorY = CGFloat(clampedY) * renderSize.height
+
+        // Animate pan with zoom-in so scale=1 stays identity, and at full zoom
+        // the focus point sits at the frame center.
+        let amount = max(targetAmount, scale)
+        let panProgress = min(1, max(0, (scale - 1) / max(0.0001, amount - 1)))
+
+        // T * p = scale * p + (1 - scale) * anchor + (mid - anchor) * panProgress
+        let tx = (1 - scale) * anchorX + (midX - anchorX) * panProgress
+        let ty = (1 - scale) * anchorY + (midY - anchorY) * panProgress
+        return CGAffineTransform(a: scale, b: 0, c: 0, d: scale, tx: tx, ty: ty)
     }
 
+    /// Cursor position in normalized video coordinates (origin top-left, 0...1).
     private func cursorPosition(at time: Double) -> CGPoint {
         guard !cursorTrack.isEmpty else { return CGPoint(x: 0.5, y: 0.5) }
+
+        let sample: CursorPosition
         if let index = cursorTrack.firstIndex(where: { $0.time >= time }) {
-            if index == 0 { return CGPoint(x: cursorTrack[0].x, y: cursorTrack[0].y) }
-            let previous = cursorTrack[index - 1]
-            let next = cursorTrack[index]
-            let t = (time - previous.time) / max(0.001, next.time - previous.time)
-            return CGPoint(
-                x: previous.x + (next.x - previous.x) * t,
-                y: previous.y + (next.y - previous.y) * t
-            )
+            if index == 0 {
+                sample = cursorTrack[0]
+            } else {
+                let previous = cursorTrack[index - 1]
+                let next = cursorTrack[index]
+                let t = (time - previous.time) / max(0.001, next.time - previous.time)
+                sample = CursorPosition(
+                    time: time,
+                    x: previous.x + (next.x - previous.x) * t,
+                    y: previous.y + (next.y - previous.y) * t
+                )
+            }
+        } else if let last = cursorTrack.last {
+            sample = last
+        } else {
+            return CGPoint(x: 0.5, y: 0.5)
         }
-        if let last = cursorTrack.last {
-            return CGPoint(x: last.x, y: last.y)
-        }
-        return CGPoint(x: 0.5, y: 0.5)
+
+        return videoPoint(fromTrack: sample)
+    }
+
+    /// Track points are stored in Cocoa space (origin bottom-left). Video frames
+    /// use top-left origin, so Y is flipped when applying zoom.
+    private func videoPoint(fromTrack sample: CursorPosition) -> CGPoint {
+        CGPoint(
+            x: min(1, max(0, sample.x)),
+            y: min(1, max(0, 1 - sample.y))
+        )
     }
 
     private func findPauseSegments() -> [(start: Double, end: Double)] {
@@ -652,7 +692,8 @@ final class EditorModel: ObservableObject {
         duration: Double
     ) {
         let transitionDuration = 0.35
-        let sampleInterval = 1.0 / 30.0
+        // Sample often enough that the zoom focus tracks cursor motion smoothly.
+        let sampleInterval = 1.0 / 60.0
 
         for range in zoomRanges.sorted(by: { $0.start < $1.start }) {
             let start = min(duration, max(0, range.start))
@@ -661,12 +702,25 @@ final class EditorModel: ObservableObject {
 
             let transition = min(transitionDuration, (end - start) / 2)
             var previousTime = start
-            var previousTransform = baseTransform
+            var previousTransform = transformForZoom(
+                at: start,
+                range: range,
+                transition: transition,
+                baseTransform: baseTransform,
+                renderSize: renderSize
+            )
+
+            // Explicit keyframe at range start so the prior identity (or prior
+            // range) transitions cleanly into this zoom.
+            layerInstruction.setTransform(
+                previousTransform,
+                at: CMTime(seconds: start, preferredTimescale: 600)
+            )
 
             var sampleTime = start + sampleInterval
             while sampleTime < end {
                 let currentTransform = transformForZoom(
-                    at: previousTime,
+                    at: sampleTime,
                     range: range,
                     transition: transition,
                     baseTransform: baseTransform,
@@ -686,7 +740,7 @@ final class EditorModel: ObservableObject {
             }
 
             let finalTransform = transformForZoom(
-                at: previousTime,
+                at: end,
                 range: range,
                 transition: transition,
                 baseTransform: baseTransform,
@@ -699,6 +753,15 @@ final class EditorModel: ObservableObject {
                 toEnd: finalTransform,
                 timeRange: CMTimeRange(start: startTime, end: endTime)
             )
+
+            // Hold identity after the zoom fully exits so later segments don't
+            // inherit a residual pan/scale.
+            if abs(zoomScale(at: end, range: range, transition: transition) - 1) < 0.001 {
+                layerInstruction.setTransform(
+                    baseTransform,
+                    at: CMTime(seconds: end, preferredTimescale: 600)
+                )
+            }
         }
     }
 
@@ -711,7 +774,12 @@ final class EditorModel: ObservableObject {
     ) -> CGAffineTransform {
         let scale = zoomScale(at: time, range: range, transition: transition)
         let center = cursorPosition(at: time)
-        let zoom = zoomTransform(renderSize: renderSize, scale: scale, center: center)
+        let zoom = zoomTransform(
+            renderSize: renderSize,
+            scale: scale,
+            center: center,
+            targetAmount: CGFloat(min(3, max(1, range.amount)))
+        )
         return baseTransform.concatenating(zoom)
     }
 
