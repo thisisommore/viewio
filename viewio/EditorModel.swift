@@ -78,15 +78,21 @@ enum ZoomAnimation: String, CaseIterable, Identifiable {
 
 private extension ZoomAnimation {
     func progress(at value: Double) -> Double {
+        let t = min(1, max(0, value))
         switch self {
         case .none, .linear:
-            value
+            return t
         case .easeIn:
-            value * value
+            // Cubic ease-in: slow start, then accelerates.
+            return t * t * t
         case .easeOut:
-            1 - (1 - value) * (1 - value)
+            // Cubic ease-out: fast start, soft landing.
+            let inv = 1 - t
+            return 1 - inv * inv * inv
         case .smooth:
-            value * value * (3 - 2 * value)
+            // Smootherstep (Perlin): zero 1st + 2nd derivatives at endpoints.
+            // Feels much less snappy than classic smoothstep for camera zooms.
+            return t * t * t * (t * (t * 6 - 15) + 10)
         }
     }
 }
@@ -254,8 +260,9 @@ final class EditorModel: ObservableObject {
     }
 
     func addZoomRange() {
-        let start = min(max(0, playhead), max(0, duration - 1.5))
-        let end = min(duration, start + min(2, max(0.5, duration)))
+        // Long enough that entry + exit transitions (~0.85s each) still leave a hold.
+        let start = min(max(0, playhead), max(0, duration - 2.5))
+        let end = min(duration, start + min(3.2, max(0.8, duration)))
         zoomRanges.append(ZoomRange(start: start, end: end))
         selectedZoomID = zoomRanges.last?.id
         rebuildPreview(preservingPlayhead: true)
@@ -303,14 +310,15 @@ final class EditorModel: ObservableObject {
         var candidates: [ZoomRange] = []
 
         for click in clickEvents {
-            let start = max(0, click.time - 0.4)
-            let end = min(duration, click.time + 0.8)
+            // Wider windows so entry/exit can ease over ~0.85s without feeling rushed.
+            let start = max(0, click.time - 0.9)
+            let end = min(duration, click.time + 1.4)
             candidates.append(ZoomRange(start: start, end: end))
         }
 
         for pause in findPauseSegments() {
-            let start = max(0, pause.start - 0.2)
-            let end = min(duration, pause.end + 0.2)
+            let start = max(0, pause.start - 0.5)
+            let end = min(duration, pause.end + 0.5)
             candidates.append(ZoomRange(start: start, end: end))
         }
 
@@ -667,6 +675,17 @@ final class EditorModel: ObservableObject {
         return max(0, min(1, max(width, height)))
     }
 
+    /// Entry/exit length: longer base ease, and a bit more time for stronger zooms.
+    private func transitionDuration(for range: ZoomRange, totalDuration: Double) -> Double {
+        let amount = min(3, max(1, range.amount))
+        // ~0.85s at 1.25x, up to ~1.15s at 2.5x+.
+        let base: Double = 0.85
+        let amountBoost = min(0.35, max(0, (amount - 1.25) * 0.35))
+        let desired = base + amountBoost
+        // Always leave a little hold in the middle when the range is long enough.
+        return min(desired, max(0.12, totalDuration / 2.4))
+    }
+
     private func zoomScale(at time: Double, range: ZoomRange, transition: Double) -> CGFloat {
         let amount = CGFloat(min(3, max(1, range.amount)))
         let relativeTime = time - range.start
@@ -691,7 +710,6 @@ final class EditorModel: ObservableObject {
         renderSize: CGSize,
         duration: Double
     ) {
-        let transitionDuration = 0.35
         // Sample often enough that the zoom focus tracks cursor motion smoothly.
         let sampleInterval = 1.0 / 60.0
 
@@ -700,7 +718,7 @@ final class EditorModel: ObservableObject {
             let end = min(duration, max(start, range.end))
             guard end > start else { continue }
 
-            let transition = min(transitionDuration, (end - start) / 2)
+            let transition = transitionDuration(for: range, totalDuration: end - start)
             var previousTime = start
             var previousTransform = transformForZoom(
                 at: start,
