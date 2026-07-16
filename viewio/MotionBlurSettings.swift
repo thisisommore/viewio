@@ -12,7 +12,7 @@ struct MotionBlurSettings: Equatable {
     /// Master switch.
     var isEnabled: Bool = false
     /// 0 = none, 1 = strong smear.
-    var amount: Double = 0.55
+    var amount: Double = 0.05
     var applyToCursor: Bool = true
     var applyToZoom: Bool = true
 
