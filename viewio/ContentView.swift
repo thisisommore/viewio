@@ -551,13 +551,17 @@ private struct CursorPlayerOverlay: View {
                 let cursorSize = 28 * state.size
                 let hotspot = CursorArtwork.hotspot(for: state.style)
                 let cursorImage = CursorArtwork.image(style: state.style, scale: 2)
+                // Keep tip inside the video frame so the glyph never draws into
+                // the letterbox (looks like the mouse left the screen).
+                let tipInset = min(videoRect.width, videoRect.height) * 0.03
 
                 ZStack {
                     // Motion-blur ghosts first (behind the live tip).
                     ForEach(Array(state.trail.enumerated().reversed()), id: \.offset) { index, sample in
-                        let tip = CGPoint(
-                            x: videoRect.minX + sample.normalizedPosition.x * videoRect.width,
-                            y: videoRect.minY + sample.normalizedPosition.y * videoRect.height
+                        let tip = clampedTip(
+                            normalized: sample.normalizedPosition,
+                            in: videoRect,
+                            inset: tipInset
                         )
                         let center = CGPoint(
                             x: tip.x + cursorSize * (0.5 - hotspot.x),
@@ -577,19 +581,34 @@ private struct CursorPlayerOverlay: View {
                     }
 
                     if let progress = state.clickProgress, state.clickEffect != .none {
-                        let tip = CGPoint(
-                            x: videoRect.minX + state.normalizedPosition.x * videoRect.width,
-                            y: videoRect.minY + state.normalizedPosition.y * videoRect.height
+                        let tip = clampedTip(
+                            normalized: state.normalizedPosition,
+                            in: videoRect,
+                            inset: tipInset
                         )
                         ClickOverlayShape(effect: state.clickEffect, progress: progress)
                             .frame(width: cursorSize * 3.2, height: cursorSize * 3.2)
                             .position(tip)
                     }
                 }
+                .frame(width: videoRect.width, height: videoRect.height)
+                .position(x: videoRect.midX, y: videoRect.midY)
+                .clipped()
                 .allowsHitTesting(false)
             }
         }
         .allowsHitTesting(false)
+    }
+
+    private func clampedTip(normalized: CGPoint, in videoRect: CGRect, inset: CGFloat) -> CGPoint {
+        let raw = CGPoint(
+            x: videoRect.minX + normalized.x * videoRect.width,
+            y: videoRect.minY + normalized.y * videoRect.height
+        )
+        return CGPoint(
+            x: min(videoRect.maxX - inset, max(videoRect.minX + inset, raw.x)),
+            y: min(videoRect.maxY - inset, max(videoRect.minY + inset, raw.y))
+        )
     }
 
     private func letterboxedRect(aspect: CGSize, in container: CGSize) -> CGRect {

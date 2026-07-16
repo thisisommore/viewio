@@ -472,168 +472,18 @@ final class EditorModel: ObservableObject {
     func generateAutoZoomRanges() {
         guard !cursorTrack.isEmpty, duration > 0.25 else { return }
 
-        var candidates: [ZoomRange] = []
-
-        // Clicks always produce a tight zoom window.
-        for click in clickEvents {
-            let start = max(0, click.time - 0.55)
-            let end = min(duration, click.time + 1.15)
-            let local = cursorPositions(in: max(0, click.time - 0.25)...min(duration, click.time + 0.25))
-            let spread = spatialSpread(of: local)
-            let amount = min(2.1, max(1.35, 1.45 + (1 - min(1, spread)) * 0.7))
-            candidates.append(
-                ZoomRange(
-                    start: start,
-                    end: max(start + 1.0, end),
-                    amount: amount,
-                    entryAnimation: .smooth,
-                    exitAnimation: .smooth
-                )
-            )
-        }
-
-        // Pauses: keep only compact, low-motion segments (cap length).
-        for pause in findPauseSegments() {
-            let pauseMid = (pause.start + pause.end) / 2
-            let pauseLen = min(2.4, max(1.0, pause.end - pause.start + 0.6))
-            let start = max(0, pauseMid - pauseLen / 2)
-            let end = min(duration, start + pauseLen)
-            let local = cursorPositions(in: start...end)
-            let spread = spatialSpread(of: local)
-            guard spread <= 0.35 else { continue }
-            let amount = min(2.0, max(1.3, 1.35 + (1 - spread) * 0.75))
-            candidates.append(
-                ZoomRange(
-                    start: start,
-                    end: end,
-                    amount: amount,
-                    entryAnimation: .smooth,
-                    exitAnimation: .smooth
-                )
-            )
-        }
-
-        if candidates.isEmpty {
-            candidates.append(contentsOf: findDwellZoomCandidates())
-            candidates = candidates.compactMap { range in
-                let spread = spatialSpread(of: cursorPositions(in: range.start...range.end))
-                guard spread <= 0.45 else { return nil }
-                let amount = min(1.9, max(1.3, 1.35 + (1 - spread) * 0.7))
-                return ZoomRange(
-                    id: range.id,
-                    start: range.start,
-                    end: range.end,
-                    amount: amount,
-                    entryAnimation: .smooth,
-                    exitAnimation: .smooth
-                )
-            }
-        }
-
-        let resolved = resolveNonOverlappingZoomRanges(
-            candidates
-                .map { clampZoomRange($0, in: duration) }
-                .map { capZoomRangeDuration($0, maxDuration: 2.8) },
-            minGap: 0.15,
-            minLength: 0.7
+        // Screen-Studio-style pipeline: cluster interest points → scenes →
+        // merge any pair that would leave a janky micro-gap between zooms.
+        zoomRanges = AutoZoomEngine.generate(
+            duration: duration,
+            cursorTrack: cursorTrack,
+            clickEvents: clickEvents
         )
-
-        zoomRanges = Array(resolved.prefix(16))
         selectedZoomID = zoomRanges.first?.id
         rebuildPreview(preservingPlayhead: true)
     }
 
-    /// Ensures zoom windows never overlap. On conflict, keep the stronger zoom
-    /// (higher amount) and trim or drop the other so a gap remains.
-    private func resolveNonOverlappingZoomRanges(
-        _ ranges: [ZoomRange],
-        minGap: Double,
-        minLength: Double
-    ) -> [ZoomRange] {
-        guard !ranges.isEmpty else { return [] }
-
-        let sorted = ranges.sorted { a, b in
-            if abs(a.start - b.start) < 0.001 {
-                return a.amount > b.amount
-            }
-            return a.start < b.start
-        }
-
-        var result: [ZoomRange] = []
-
-        for candidate in sorted {
-            var range = candidate
-            guard range.end - range.start >= minLength else { continue }
-
-            if result.isEmpty {
-                result.append(range)
-                continue
-            }
-
-            let lastIndex = result.count - 1
-            var last = result[lastIndex]
-
-            if range.start >= last.end + minGap {
-                result.append(range)
-                continue
-            }
-
-            let trimmedStart = last.end + minGap
-            if range.end - trimmedStart >= minLength {
-                range.start = trimmedStart
-                result.append(range)
-                continue
-            }
-
-            if range.amount > last.amount + 0.05 {
-                let roomEnd = range.start - minGap
-                if roomEnd - last.start >= minLength {
-                    last.end = roomEnd
-                    result[lastIndex] = last
-                    result.append(range)
-                } else {
-                    result[lastIndex] = range
-                }
-            }
-        }
-
-        var cleaned: [ZoomRange] = []
-        for range in result.sorted(by: { $0.start < $1.start }) {
-            guard let current = cleaned.last else {
-                cleaned.append(range)
-                continue
-            }
-            if range.start >= current.end + minGap {
-                cleaned.append(range)
-            } else {
-                let start = current.end + minGap
-                if range.end - start >= minLength {
-                    var trimmed = range
-                    trimmed.start = start
-                    cleaned.append(trimmed)
-                } else if range.amount > current.amount {
-                    cleaned[cleaned.count - 1] = range
-                }
-            }
-        }
-
-        return cleaned
-    }
-
-    private func capZoomRangeDuration(_ range: ZoomRange, maxDuration: Double) -> ZoomRange {
-        let length = range.end - range.start
-        guard length > maxDuration else { return range }
-        let mid = (range.start + range.end) / 2
-        return ZoomRange(
-            id: range.id,
-            start: mid - maxDuration / 2,
-            end: mid + maxDuration / 2,
-            amount: range.amount,
-            entryAnimation: range.entryAnimation,
-            exitAnimation: range.exitAnimation
-        )
-    }
-
+    /// Used by the video compositor path when manual ranges overlap.
     private func clampZoomRange(_ range: ZoomRange, in duration: Double) -> ZoomRange {
         var start = min(max(0, range.start), max(0, duration - 0.25))
         var end = min(duration, max(start + 0.25, range.end))
@@ -651,32 +501,35 @@ final class EditorModel: ObservableObject {
         )
     }
 
-    /// When there are no clicks, invent zoom windows around slow cursor segments.
-    private func findDwellZoomCandidates() -> [ZoomRange] {
-        let pauses = findPauseSegments()
-        if !pauses.isEmpty {
-            return pauses.map { pause in
-                ZoomRange(
-                    start: max(0, pause.start - 0.4),
-                    end: min(duration, pause.end + 0.8)
-                )
+    /// Ensures zoom windows never overlap for transform ramps.
+    /// Close ranges are merged (not trimmed with a tiny gap) so the camera
+    /// does not zoom out and immediately back in.
+    private func resolveNonOverlappingZoomRanges(
+        _ ranges: [ZoomRange],
+        minGap: Double,
+        minLength: Double
+    ) -> [ZoomRange] {
+        guard !ranges.isEmpty else { return [] }
+
+        let sorted = ranges.sorted { $0.start < $1.start }
+        var result: [ZoomRange] = [sorted[0]]
+
+        for range in sorted.dropFirst() {
+            var last = result[result.count - 1]
+            let gap = range.start - last.end
+            // Merge overlaps and any gap too small for a clean full-frame beat.
+            if gap < max(minGap, 1.75) {
+                last.end = max(last.end, range.end)
+                last.amount = max(last.amount, range.amount)
+                last.entryAnimation = .smooth
+                last.exitAnimation = .smooth
+                result[result.count - 1] = last
+            } else if range.end - range.start >= minLength {
+                result.append(range)
             }
         }
 
-        // Last resort: a few evenly spaced zooms along the track so Auto Zoom always does something.
-        guard duration > 2 else { return [] }
-        var result: [ZoomRange] = []
-        let count = min(4, max(1, Int(duration / 8)))
-        for index in 0..<count {
-            let center = duration * (Double(index) + 0.5) / Double(count)
-            result.append(
-                ZoomRange(
-                    start: max(0, center - 1.1),
-                    end: min(duration, center + 1.1)
-                )
-            )
-        }
-        return result
+        return result.filter { $0.end - $0.start >= minLength }
     }
 
     func export() {
@@ -968,7 +821,8 @@ final class EditorModel: ObservableObject {
                 let length = max(0.001, range.end - range.start)
                 let transition = transitionDuration(for: range, totalDuration: length)
                 scale = zoomScale(at: time, range: range, transition: transition)
-                focus = focusPoint(for: range)
+                // Live cursor focus so the pointer stays inside the zoomed view.
+                focus = zoomFocus(at: time, in: range)
                 zoom = zoomTransform(
                     renderSize: renderSize,
                     scale: scale,
@@ -1014,11 +868,7 @@ final class EditorModel: ObservableObject {
         renderSize: CGSize,
         baseTransform: CGAffineTransform
     ) -> CGPoint {
-        let normalized = CursorMotion.position(
-            at: time,
-            in: processedCursorTrack,
-            motion: cursorSettings.motion
-        )
+        let normalized = cursorPosition(at: time)
         let sourcePoint = CGPoint(
             x: normalized.x * renderSize.width,
             y: normalized.y * renderSize.height
@@ -1027,9 +877,14 @@ final class EditorModel: ObservableObject {
         // Match video composition: baseTransform.concatenating(zoom).
         let zoom = activeZoomTransform(at: time, renderSize: renderSize)
         let transformed = sourcePoint.applying(baseTransform.concatenating(zoom))
+
+        // Keep the tip on-screen with a small margin so the glyph doesn't spill
+        // into letterboxing / off the frame.
+        let marginX = min(renderSize.width * 0.04, 36)
+        let marginY = min(renderSize.height * 0.04, 36)
         return CGPoint(
-            x: min(renderSize.width, max(0, transformed.x)),
-            y: min(renderSize.height, max(0, transformed.y))
+            x: min(renderSize.width - marginX, max(marginX, transformed.x)),
+            y: min(renderSize.height - marginY, max(marginY, transformed.y))
         )
     }
 
@@ -1040,13 +895,25 @@ final class EditorModel: ObservableObject {
         let rangeDuration = max(0.001, range.end - range.start)
         let transition = transitionDuration(for: range, totalDuration: rangeDuration)
         let scale = zoomScale(at: time, range: range, transition: transition)
-        // Prefer stable focus; fall back to live cursor for overlay smoothness.
-        let center = focusPoint(for: range)
+        // Follow the live cursor so it stays inside the zoomed frame.
+        let center = zoomFocus(at: time, in: range)
         return zoomTransform(
             renderSize: renderSize,
             scale: scale,
             center: center,
             targetAmount: CGFloat(min(3, max(1, range.amount)))
+        )
+    }
+
+    /// Camera focus for a moment inside a zoom range: track the cursor, with a
+    /// light blend toward the scene centroid so micro-jitter is reduced.
+    private func zoomFocus(at time: Double, in range: ZoomRange) -> CGPoint {
+        let live = cursorPosition(at: time)
+        let scene = focusPoint(for: range)
+        // Mostly live so the pointer never races out of frame.
+        return CGPoint(
+            x: live.x * 0.88 + scene.x * 0.12,
+            y: live.y * 0.88 + scene.y * 0.12
         )
     }
 
@@ -1068,10 +935,15 @@ final class EditorModel: ObservableObject {
         let midX = renderSize.width / 2
         let midY = renderSize.height / 2
 
-        // Keep the scaled content covering the full frame (no black bars).
-        let inset = min(0.49, 0.5 / Double(safeScale))
-        let clampedX = min(1 - inset, max(inset, Double(center.x.isFinite ? center.x : 0.5)))
-        let clampedY = min(1 - inset, max(inset, Double(center.y.isFinite ? center.y : 0.5)))
+        // Clamp focus so (1) we never show black bars and (2) the true cursor
+        // still lands inside the visible window when near screen edges.
+        let half = 0.5 / Double(safeScale)
+        // Slightly tighter than `half` so the tip isn't glued to the crop edge.
+        let inset = min(0.49, half * 0.92)
+        let rawX = Double(center.x.isFinite ? center.x : 0.5)
+        let rawY = Double(center.y.isFinite ? center.y : 0.5)
+        let clampedX = min(1 - inset, max(inset, rawX))
+        let clampedY = min(1 - inset, max(inset, rawY))
         let anchorX = CGFloat(clampedX) * renderSize.width
         let anchorY = CGFloat(clampedY) * renderSize.height
 
@@ -1101,76 +973,8 @@ final class EditorModel: ObservableObject {
         return CursorMotion.position(at: time, in: raw, motion: .natural)
     }
 
-    private func findPauseSegments() -> [(start: Double, end: Double)] {
-        guard cursorTrack.count >= 2 else { return [] }
-
-        let velocityThreshold: Double = 0.2
-        let minimumPauseDuration: Double = 0.3
-
-        var pauses: [(start: Double, end: Double)] = []
-        var pauseStart: Double?
-
-        for index in 0..<(cursorTrack.count - 1) {
-            let current = cursorTrack[index]
-            let next = cursorTrack[index + 1]
-            let dx = next.x - current.x
-            let dy = next.y - current.y
-            let dt = next.time - current.time
-            let velocity = dt > 0 ? sqrt(dx * dx + dy * dy) / dt : 0
-
-            if velocity < velocityThreshold {
-                if pauseStart == nil {
-                    pauseStart = current.time
-                }
-            } else if let start = pauseStart {
-                let end = current.time
-                if end - start >= minimumPauseDuration {
-                    pauses.append((start: start, end: end))
-                }
-                pauseStart = nil
-            }
-        }
-
-        if let start = pauseStart, let last = cursorTrack.last {
-            let end = last.time
-            if end - start >= minimumPauseDuration {
-                pauses.append((start: start, end: end))
-            }
-        }
-
-        return pauses
-    }
-
-    private func mergeZoomRanges(_ ranges: [ZoomRange]) -> [ZoomRange] {
-        guard !ranges.isEmpty else { return [] }
-
-        let sorted = ranges.sorted { $0.start < $1.start }
-        var merged: [ZoomRange] = [sorted[0]]
-
-        for range in sorted.dropFirst() {
-            var last = merged[merged.count - 1]
-            if range.start <= last.end {
-                last.end = max(last.end, range.end)
-                merged[merged.count - 1] = last
-            } else {
-                merged.append(range)
-            }
-        }
-
-        return merged
-    }
-
     private func cursorPositions(in timeRange: ClosedRange<Double>) -> [CursorPosition] {
         cursorTrack.filter { $0.time >= timeRange.lowerBound && $0.time <= timeRange.upperBound }
-    }
-
-    private func spatialSpread(of positions: [CursorPosition]) -> Double {
-        guard positions.count >= 2 else { return 0 }
-        let xs = positions.map { $0.x }
-        let ys = positions.map { $0.y }
-        let width = xs.max()! - xs.min()!
-        let height = ys.max()! - ys.min()!
-        return max(0, min(1, max(width, height)))
     }
 
     /// Entry/exit length: longer base ease, and a bit more time for stronger zooms.
@@ -1261,9 +1065,9 @@ final class EditorModel: ObservableObject {
                 length * 0.45
             )
             let amount = CGFloat(min(2.5, max(1.15, range.amount)))
-            let focus = focusPoint(for: range)
 
-            func transform(scale: CGFloat, center: CGPoint) -> CGAffineTransform {
+            func transform(scale: CGFloat, at time: Double) -> CGAffineTransform {
+                let center = zoomFocus(at: time, in: range)
                 let zoom = zoomTransform(
                     renderSize: renderSize,
                     scale: scale,
@@ -1277,10 +1081,18 @@ final class EditorModel: ObservableObject {
             let exitStart = range.end - transition
 
             append(range.start, safeBase)
-            append(entryEnd, transform(scale: amount, center: focus))
+            append(entryEnd, transform(scale: amount, at: entryEnd))
 
-            if exitStart > entryEnd + 0.05 {
-                append(exitStart, transform(scale: amount, center: focus))
+            // Sparse live-follow samples so the camera tracks the cursor mid-zoom.
+            if exitStart - entryEnd > 0.35 {
+                var sample = entryEnd + 0.28
+                while sample < exitStart - 0.05 {
+                    append(sample, transform(scale: amount, at: sample))
+                    sample += 0.28
+                }
+                append(exitStart, transform(scale: amount, at: exitStart))
+            } else if exitStart > entryEnd + 0.05 {
+                append(exitStart, transform(scale: amount, at: exitStart))
             }
 
             append(range.end, safeBase)
