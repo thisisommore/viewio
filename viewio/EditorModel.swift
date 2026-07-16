@@ -122,6 +122,15 @@ enum InspectorTab: String, CaseIterable, Identifiable {
         case .background: "Background"
         }
     }
+
+    var systemImage: String {
+        switch self {
+        case .edit: "scissors"
+        case .cursor: "cursorarrow.motionlines"
+        case .camera: "camera.fill"
+        case .background: "photo.fill"
+        }
+    }
 }
 
 /// Live preview of the custom cursor (UI overlay — CA tool is export-only).

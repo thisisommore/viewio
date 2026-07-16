@@ -865,15 +865,10 @@ private struct ClipInspector: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Picker("Inspector", selection: $model.inspectorTab) {
-                ForEach(InspectorTab.allCases) { tab in
-                    Text(tab.title).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 14)
-            .padding(.top, 12)
-            .padding(.bottom, 10)
+            InspectorTabBar(selection: $model.inspectorTab)
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
 
             Divider()
 
@@ -1015,6 +1010,58 @@ private struct ClipInspector: View {
             selection: range.exitAnimation,
             onChange: { model.setZoomExitAnimation($0, for: range.id) }
         )
+    }
+}
+
+private struct InspectorTabBar: View {
+    @Binding var selection: InspectorTab
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(InspectorTab.allCases) { tab in
+                InspectorTabButton(
+                    tab: tab,
+                    isSelected: selection == tab
+                ) {
+                    selection = tab
+                }
+            }
+        }
+        .padding(4)
+        .background {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.primary.opacity(0.05))
+        }
+    }
+}
+
+private struct InspectorTabButton: View {
+    let tab: InspectorTab
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: tab.systemImage)
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(height: 14)
+                Text(tab.title)
+                    .font(.system(size: 9, weight: .medium))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .foregroundStyle(isSelected ? Color.accentColor : Color.primary.opacity(0.55))
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                        .shadow(color: .black.opacity(0.08), radius: 1, y: 0.5)
+                }
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 
