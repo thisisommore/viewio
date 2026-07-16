@@ -23,6 +23,93 @@ struct DisplayInfo: Identifiable, Equatable {
     var idValue: UInt32 { id }
 }
 
+/// Output resolution for screen capture (scaled to fit the display aspect ratio).
+enum RecordingResolution: String, CaseIterable, Identifiable {
+    case native
+    case uhd4k
+    case qhd
+    case fullHD
+    case hd
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .native: "Native"
+        case .uhd4k: "4K"
+        case .qhd: "1440p"
+        case .fullHD: "1080p"
+        case .hd: "720p"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .native: "Full display"
+        case .uhd4k: "3840×2160"
+        case .qhd: "2560×1440"
+        case .fullHD: "1920×1080"
+        case .hd: "1280×720"
+        }
+    }
+
+    /// Target long-edge / short-edge caps. `nil` means use the display as-is.
+    var maxSize: CGSize? {
+        switch self {
+        case .native: nil
+        case .uhd4k: CGSize(width: 3840, height: 2160)
+        case .qhd: CGSize(width: 2560, height: 1440)
+        case .fullHD: CGSize(width: 1920, height: 1080)
+        case .hd: CGSize(width: 1280, height: 720)
+        }
+    }
+
+    /// Scales `native` to fit inside this preset while preserving aspect ratio.
+    /// Never upscales past the native pixel size.
+    func outputSize(forNative native: CGSize) -> CGSize {
+        let width = max(2, native.width)
+        let height = max(2, native.height)
+        guard let maxSize else {
+            return evenSize(CGSize(width: width, height: height))
+        }
+
+        let scale = min(
+            1,
+            min(maxSize.width / width, maxSize.height / height)
+        )
+        return evenSize(CGSize(width: width * scale, height: height * scale))
+    }
+
+    private func evenSize(_ size: CGSize) -> CGSize {
+        CGSize(
+            width: max(2, (size.width / 2).rounded(.down) * 2),
+            height: max(2, (size.height / 2).rounded(.down) * 2)
+        )
+    }
+}
+
+enum RecordingFrameRate: Int, CaseIterable, Identifiable {
+    case fps15 = 15
+    case fps24 = 24
+    case fps30 = 30
+    case fps60 = 60
+
+    var id: Int { rawValue }
+
+    var title: String { "\(rawValue) fps" }
+
+    var subtitle: String {
+        switch self {
+        case .fps15: "Smaller files"
+        case .fps24: "Cinematic"
+        case .fps30: "Standard"
+        case .fps60: "Smooth"
+        }
+    }
+
+    var timescale: CMTimeScale { CMTimeScale(rawValue) }
+}
+
 struct CursorPosition: Codable, Equatable {
     let time: TimeInterval
     let x: Double
@@ -53,6 +140,8 @@ final class RecordingController: NSObject, ObservableObject {
     @Published private(set) var availableMicrophones: [AudioDevice] = []
     @Published var selectedDisplayID: CGDirectDisplayID?
     @Published private(set) var availableDisplays: [DisplayInfo] = []
+    @Published var selectedResolution: RecordingResolution = .native
+    @Published var selectedFrameRate: RecordingFrameRate = .fps60
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -148,9 +237,15 @@ final class RecordingController: NSObject, ObservableObject {
         let outputURL = try makeOutputURL()
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let configuration = SCStreamConfiguration()
-        configuration.width = CGDisplayPixelsWide(display.displayID)
-        configuration.height = CGDisplayPixelsHigh(display.displayID)
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+
+        let nativeSize = CGSize(
+            width: CGDisplayPixelsWide(display.displayID),
+            height: CGDisplayPixelsHigh(display.displayID)
+        )
+        let outputSize = selectedResolution.outputSize(forNative: nativeSize)
+        configuration.width = Int(outputSize.width)
+        configuration.height = Int(outputSize.height)
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: selectedFrameRate.timescale)
         configuration.queueDepth = 5
         // Hide the system cursor in the captured frames so the editor can redraw
         // a custom, animated cursor from the separately tracked path.
@@ -256,7 +351,9 @@ final class RecordingController: NSObject, ObservableObject {
         guard let recordedDisplayID else { return }
         let bounds = CGDisplayBounds(recordedDisplayID)
 
-        cursorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        // Sample cursor at least as often as capture FPS (capped for overhead).
+        let cursorHz = min(60.0, max(30.0, Double(selectedFrameRate.rawValue)))
+        cursorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / cursorHz, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let startedAt = self.startedAt else { return }
                 let location = NSEvent.mouseLocation

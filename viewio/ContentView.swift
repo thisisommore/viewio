@@ -87,6 +87,8 @@ private struct RecordingStartView: View {
 
                     DisplayOptionsView(recorder: recorder, isPreparing: isPreparing)
 
+                    VideoQualityOptionsView(recorder: recorder, isPreparing: isPreparing)
+
                     AudioOptionsView(recorder: recorder, isPreparing: isPreparing)
                 }
                 .padding(32)
@@ -172,6 +174,79 @@ private struct DisplayOptionsView: View {
     }
 }
 
+private struct VideoQualityOptionsView: View {
+    @ObservedObject var recorder: RecordingController
+    let isPreparing: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 14) {
+                sectionTitle("Resolution")
+                Text(resolutionHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 100, maximum: 140), spacing: 10)],
+                    alignment: .leading,
+                    spacing: 10
+                ) {
+                    ForEach(RecordingResolution.allCases) { resolution in
+                        SelectionCard(
+                            title: resolution.title,
+                            subtitle: resolution.subtitle,
+                            isSelected: recorder.selectedResolution == resolution,
+                            isDisabled: isPreparing
+                        ) {
+                            recorder.selectedResolution = resolution
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                sectionTitle("Frame rate")
+                Text("Higher FPS is smoother; lower FPS keeps files smaller.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 100, maximum: 140), spacing: 10)],
+                    alignment: .leading,
+                    spacing: 10
+                ) {
+                    ForEach(RecordingFrameRate.allCases) { fps in
+                        SelectionCard(
+                            title: fps.title,
+                            subtitle: fps.subtitle,
+                            isSelected: recorder.selectedFrameRate == fps,
+                            isDisabled: isPreparing
+                        ) {
+                            recorder.selectedFrameRate = fps
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var resolutionHint: String {
+        guard let display = recorder.availableDisplays.first(where: { $0.id == recorder.selectedDisplayID })
+                ?? recorder.availableDisplays.first else {
+            return "Scaled to fit the selected display. Never upscaled past native."
+        }
+        let native = CGSize(
+            width: CGDisplayPixelsWide(display.id),
+            height: CGDisplayPixelsHigh(display.id)
+        )
+        let out = recorder.selectedResolution.outputSize(forNative: native)
+        return String(
+            format: "Output ≈ %.0f×%.0f (display %.0f×%.0f). Never upscaled past native.",
+            out.width, out.height, native.width, native.height
+        )
+    }
+}
+
 private struct AudioOptionsView: View {
     @ObservedObject var recorder: RecordingController
     let isPreparing: Bool
@@ -220,18 +295,28 @@ private struct AudioOptionsView: View {
 
 private struct SelectionCard: View {
     let title: String
+    var subtitle: String? = nil
     let isSelected: Bool
     let isDisabled: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .font(.system(size: 13, weight: .medium))
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-                .padding(.horizontal, 12)
+            VStack(spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
         }
         .buttonStyle(SelectionCardStyle(isSelected: isSelected))
         .disabled(isDisabled)
