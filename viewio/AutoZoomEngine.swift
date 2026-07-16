@@ -321,7 +321,7 @@ enum AutoZoomEngine {
 
     // MARK: - Cursor helpers
 
-    /// Cursor track is Cocoa bottom-left normalized; convert to video top-left.
+    /// Track is video top-left normalized (EditorModel converts legacy files on load).
     private static func videoPosition(at time: Double, in track: [CursorPosition]) -> (x: Double, y: Double) {
         guard !track.isEmpty else { return (0.5, 0.5) }
 
@@ -347,7 +347,7 @@ enum AutoZoomEngine {
 
         return (
             min(1, max(0, sample.x)),
-            min(1, max(0, 1 - sample.y))
+            min(1, max(0, sample.y))
         )
     }
 }

@@ -126,6 +126,18 @@ enum CursorStyle: String, CaseIterable, Identifiable {
         default: true
         }
     }
+
+    /// True when the hotspot is the arrow tip (top-left), so tip-pixel detection
+    /// is valid. Centered cursors (cross, I-beam, …) must use the system plist
+    /// hotspot instead.
+    var usesArrowTipHotspot: Bool {
+        switch self {
+        case .macArrow, .macArrowBlack, .modern, .soft:
+            true
+        default:
+            false
+        }
+    }
 }
 
 // MARK: - Motion
@@ -201,8 +213,8 @@ enum CursorClickEffect: String, CaseIterable, Identifiable {
 // MARK: - Track processing
 
 enum CursorMotion {
-    /// Converts Cocoa bottom-left samples to video top-left normalized points,
-    /// then applies motion smoothing for the selected style.
+    /// Track samples are expected in **video top-left** normalized space (0...1).
+    /// Applies optional motion smoothing for camera-style paths.
     static func process(
         track: [CursorPosition],
         motion: CursorMotionStyle
@@ -213,7 +225,7 @@ enum CursorMotion {
             CursorPosition(
                 time: sample.time,
                 x: min(1, max(0, sample.x)),
-                y: min(1, max(0, 1 - sample.y))
+                y: min(1, max(0, sample.y))
             )
         }
 
@@ -254,6 +266,7 @@ enum CursorMotion {
             let next = track[index]
             var t = (time - previous.time) / max(0.001, next.time - previous.time)
             t = min(1, max(0, t))
+            // Only ease for cinematic camera paths — never for precise tip drawing.
             if motion.usesEasedInterpolation {
                 t = t * t * t * (t * (t * 6 - 15) + 10)
             }
@@ -282,13 +295,23 @@ enum CursorArtwork {
     private static let cacheLock = NSLock()
 
     /// Hotspot as a fraction of image size (origin top-left of the bitmap).
+    /// System cursors use Apple's `info.plist` hotx/hoty (correct for crosshair,
+    /// I-beam, hands, etc.). Drawn arrows use tip detection so the hotspot
+    /// lands exactly on the recorded cursor point.
     static func hotspot(for style: CursorStyle) -> CGPoint {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         if let cached = hotspotCache[style] {
             return cached
         }
-        let value = resolveHotspot(for: style)
+        // Force-render so system/drawn hotspots are populated.
+        cacheLock.unlock()
+        _ = image(style: style, scale: 3)
+        cacheLock.lock()
+        if let cached = hotspotCache[style] {
+            return cached
+        }
+        let value = fallbackHotspot(for: style)
         hotspotCache[style] = value
         return value
     }
@@ -303,18 +326,26 @@ enum CursorArtwork {
         cacheLock.unlock()
 
         let rendered: NSImage
+        let hotspot: CGPoint
         if let folder = style.systemCursorFolder,
            let system = renderSystemCursor(folder: folder, pixelScale: max(2, scale)) {
             rendered = system.image
-            cacheLock.lock()
-            hotspotCache[style] = system.hotspot
-            cacheLock.unlock()
+            // Apple's hotx/hoty are the real click point for each system cursor.
+            // Never use "topmost pixel" here — that breaks crosshair, I-beam, hands.
+            hotspot = system.hotspot
+        } else if style.usesArrowTipHotspot {
+            rendered = renderDrawnCursor(style: style, scale: max(2, scale))
+            // Use the detected tip directly so the overlay hotspot matches the
+            // recorded cursor point instead of being shifted by an optical nudge.
+            hotspot = detectTipHotspot(in: rendered) ?? fallbackHotspot(for: style)
         } else {
             rendered = renderDrawnCursor(style: style, scale: max(2, scale))
+            hotspot = fallbackHotspot(for: style)
         }
 
         cacheLock.lock()
         imageCache[cacheKey] = rendered
+        hotspotCache[style] = hotspot
         cacheLock.unlock()
         return rendered
     }
@@ -325,9 +356,9 @@ enum CursorArtwork {
         return nsImage.cgImage(forProposedRect: &rect, context: nil, hints: nil)
     }
 
-    // MARK: System PDF loaders
+    // MARK: Tip / hotspot
 
-    private static func resolveHotspot(for style: CursorStyle) -> CGPoint {
+    private static func fallbackHotspot(for style: CursorStyle) -> CGPoint {
         if let folder = style.systemCursorFolder,
            let meta = loadSystemCursorMetadata(folder: folder) {
             return CGPoint(
@@ -337,14 +368,71 @@ enum CursorArtwork {
         }
         switch style {
         case .macArrow, .macArrowBlack, .modern, .soft:
-            // Tip near top-left of the drawn arrow in a 32pt box.
-            return CGPoint(x: 4.0 / 32.0, y: 4.0 / 32.0)
+            return CGPoint(x: 5.0 / 32.0, y: 4.0 / 32.0)
         case .dot:
             return CGPoint(x: 0.5, y: 0.5)
         default:
             return CGPoint(x: 0.2, y: 0.15)
         }
     }
+
+    /// Find the topmost (then leftmost) opaque pixel — the visual tip.
+    /// The hotspot is the top-left corner of that pixel, which aligns with the
+    /// actual point of the arrow better than the pixel center when the cursor
+    /// is rendered at small sizes.
+    private static func detectTipHotspot(in image: NSImage) -> CGPoint? {
+        var rect = CGRect(origin: .zero, size: image.size)
+        guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
+            return nil
+        }
+        return detectTipHotspot(in: cgImage)
+    }
+
+    private static func detectTipHotspot(in image: CGImage) -> CGPoint? {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return nil }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var data = [UInt8](repeating: 0, count: height * bytesPerRow)
+        guard let context = CGContext(
+            data: &data,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        // Draw with top-left origin into our buffer (flip so row 0 is top).
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let alphaThreshold: UInt8 = 40
+        // Topmost row with ink, then leftmost pixel on that row (arrow tip).
+        for y in 0..<height {
+            var rowLeft: Int?
+            for x in 0..<width {
+                let alpha = data[y * bytesPerRow + x * bytesPerPixel + 3]
+                if alpha >= alphaThreshold {
+                    rowLeft = x
+                    break
+                }
+            }
+            if let x = rowLeft {
+                return CGPoint(
+                    x: CGFloat(x) / CGFloat(width),
+                    y: CGFloat(y) / CGFloat(height)
+                )
+            }
+        }
+        return nil
+    }
+
+    // MARK: System PDF loaders
 
     private struct SystemCursorMetadata {
         var width: CGFloat

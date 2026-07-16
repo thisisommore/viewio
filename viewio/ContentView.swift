@@ -451,41 +451,108 @@ private struct EditorWorkspace: View {
 
 private struct PlayerView: NSViewRepresentable {
     let player: AVPlayer
+    @Binding var videoRect: CGRect
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(videoRect: $videoRect)
+    }
 
     func makeNSView(context: Context) -> AVPlayerView {
-        let playerView = AVPlayerView()
+        let playerView = TrackingPlayerView()
         playerView.player = player
         playerView.controlsStyle = .none
         playerView.videoGravity = .resizeAspect
-        // Prefer sharp downscale of high-res captures in the preview pane.
         playerView.wantsLayer = true
         playerView.layer?.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
         playerView.layer?.minificationFilter = .trilinear
         playerView.layer?.magnificationFilter = .trilinear
+        playerView.onVideoRectChange = { rect in
+            context.coordinator.updateVideoRect(rect)
+        }
         return playerView
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
         nsView.player = player
         if let item = player.currentItem {
-            // Don't throttle decode for a soft low-bitrate preview.
             item.preferredPeakBitRate = 0
             item.preferredMaximumResolution = CGSize(width: 8192, height: 8192)
         }
+        if let tracking = nsView as? TrackingPlayerView {
+            tracking.onVideoRectChange = { rect in
+                context.coordinator.updateVideoRect(rect)
+            }
+            tracking.reportVideoRect()
+        }
+    }
+
+    final class Coordinator {
+        var binding: Binding<CGRect>
+        init(videoRect: Binding<CGRect>) { binding = videoRect }
+        @MainActor
+        func updateVideoRect(_ rect: CGRect) {
+            if binding.wrappedValue != rect {
+                binding.wrappedValue = rect
+            }
+        }
+    }
+}
+
+/// Reports the exact `AVPlayerLayer.videoRect` so the cursor overlay lines up
+/// with pixels (AVMakeRect alone can be a few points off).
+private final class TrackingPlayerView: AVPlayerView {
+    var onVideoRectChange: ((CGRect) -> Void)?
+
+    override func layout() {
+        super.layout()
+        reportVideoRect()
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        reportVideoRect()
+    }
+
+    func reportVideoRect() {
+        let rect = resolvedVideoRect()
+        onVideoRectChange?(rect)
+    }
+
+    private func resolvedVideoRect() -> CGRect {
+        guard let playerLayer = findPlayerLayer(in: layer) else {
+            return bounds
+        }
+        let video = playerLayer.videoRect
+        guard video.width > 1, video.height > 1 else { return bounds }
+        // videoRect is in the player layer's space — convert into this view.
+        if let superlayer = playerLayer.superlayer, let host = layer {
+            return host.convert(video, from: playerLayer)
+        }
+        return video
+    }
+
+    private func findPlayerLayer(in layer: CALayer?) -> AVPlayerLayer? {
+        guard let layer else { return nil }
+        if let playerLayer = layer as? AVPlayerLayer { return playerLayer }
+        for child in layer.sublayers ?? [] {
+            if let found = findPlayerLayer(in: child) { return found }
+        }
+        return nil
     }
 }
 
 private struct VideoPreview: View {
     @ObservedObject var model: EditorModel
+    @State private var playerVideoRect: CGRect = .zero
 
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                PlayerView(player: model.player)
+                PlayerView(player: model.player, videoRect: $playerVideoRect)
                     .background(Color.black)
 
                 // Live cursor overlay — Core Animation tool cannot run on AVPlayerItem.
-                CursorPlayerOverlay(model: model)
+                CursorPlayerOverlay(model: model, playerVideoRect: playerVideoRect)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -537,32 +604,32 @@ private struct VideoPreview: View {
     }
 }
 
-/// Draws the custom cursor on top of the player, letterboxed to match the video.
+/// Draws the custom cursor on top of the player, aligned to the real video rect.
 private struct CursorPlayerOverlay: View {
     @ObservedObject var model: EditorModel
+    var playerVideoRect: CGRect
 
     var body: some View {
         GeometryReader { geometry in
             let container = geometry.size
             let render = model.videoRenderSize
-            let videoRect = letterboxedRect(aspect: render, in: container)
+            // Prefer the live AVPlayerLayer rect; fall back to aspect-fit math.
+            let videoRect: CGRect = {
+                if playerVideoRect.width > 2, playerVideoRect.height > 2 {
+                    return playerVideoRect
+                }
+                return letterboxedRect(aspect: render, in: container)
+            }()
 
             if let state = model.cursorPreview(at: model.playhead) {
-                let cursorSize = 28 * state.size
+                let cursorSize = 16 * state.size
                 let hotspot = CursorArtwork.hotspot(for: state.style)
                 let cursorImage = CursorArtwork.image(style: state.style, scale: 2)
-                // Keep tip inside the video frame so the glyph never draws into
-                // the letterbox (looks like the mouse left the screen).
-                let tipInset = min(videoRect.width, videoRect.height) * 0.03
 
                 ZStack {
-                    // Motion-blur ghosts first (behind the live tip).
                     ForEach(Array(state.trail.enumerated().reversed()), id: \.offset) { index, sample in
-                        let tip = clampedTip(
-                            normalized: sample.normalizedPosition,
-                            in: videoRect,
-                            inset: tipInset
-                        )
+                        let tip = tipPoint(normalized: sample.normalizedPosition, in: videoRect)
+                        // Anchor the *hotspot* (tip) at the recorded point — not the image center.
                         let center = CGPoint(
                             x: tip.x + cursorSize * (0.5 - hotspot.x),
                             y: tip.y + cursorSize * (0.5 - hotspot.y)
@@ -573,19 +640,15 @@ private struct CursorPlayerOverlay: View {
                             .frame(width: cursorSize, height: cursorSize)
                             .opacity(sample.opacity)
                             .shadow(
-                                color: .black.opacity(index == 0 ? 0.25 : 0.08),
-                                radius: index == 0 ? 1.5 : 0.5,
-                                y: 0.5
+                                color: .black.opacity(index == 0 ? 0.2 : 0.06),
+                                radius: index == 0 ? 1.2 : 0.4,
+                                y: 0.4
                             )
                             .position(center)
                     }
 
                     if let progress = state.clickProgress, state.clickEffect != .none {
-                        let tip = clampedTip(
-                            normalized: state.normalizedPosition,
-                            in: videoRect,
-                            inset: tipInset
-                        )
+                        let tip = tipPoint(normalized: state.normalizedPosition, in: videoRect)
                         ClickOverlayShape(effect: state.clickEffect, progress: progress)
                             .frame(width: cursorSize * 3.2, height: cursorSize * 3.2)
                             .position(tip)
@@ -600,14 +663,10 @@ private struct CursorPlayerOverlay: View {
         .allowsHitTesting(false)
     }
 
-    private func clampedTip(normalized: CGPoint, in videoRect: CGRect, inset: CGFloat) -> CGPoint {
-        let raw = CGPoint(
-            x: videoRect.minX + normalized.x * videoRect.width,
-            y: videoRect.minY + normalized.y * videoRect.height
-        )
-        return CGPoint(
-            x: min(videoRect.maxX - inset, max(videoRect.minX + inset, raw.x)),
-            y: min(videoRect.maxY - inset, max(videoRect.minY + inset, raw.y))
+    private func tipPoint(normalized: CGPoint, in videoRect: CGRect) -> CGPoint {
+        CGPoint(
+            x: videoRect.minX + min(1, max(0, normalized.x)) * videoRect.width,
+            y: videoRect.minY + min(1, max(0, normalized.y)) * videoRect.height
         )
     }
 

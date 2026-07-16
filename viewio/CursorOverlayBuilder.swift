@@ -35,7 +35,7 @@ enum CursorOverlayBuilder {
         let videoLayer = CALayer()
         videoLayer.frame = parentLayer.bounds
 
-        let cursorSize = 32 * CGFloat(settings.size)
+        let cursorSize = 16 * CGFloat(settings.size)
         let hotspot = CursorArtwork.hotspot(for: settings.style)
 
         parentLayer.addSublayer(videoLayer)

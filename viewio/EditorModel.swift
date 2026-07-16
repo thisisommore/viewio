@@ -170,8 +170,15 @@ final class EditorModel: ObservableObject {
     @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
 
     private var cursorTrack: [CursorPosition] = []
+    /// Precise video-space track (no smoothing) — used to draw the cursor on content.
+    private var preciseCursorTrack: [CursorPosition] = []
+    /// Optional smoothed track for soft camera follow.
     private var processedCursorTrack: [CursorPosition] = []
     private var clickEvents: [ClickEvent] = []
+    /// Same zoom transforms used by the video composition — cursor overlay must
+    /// sample these so tip and content stay locked when zoomed.
+    private var zoomTransformSamples: [ZoomTransformSample] = []
+    private var compositionBaseTransform: CGAffineTransform = .identity
     @Published var isPlaying = false
 
     private var sourceAsset: AVURLAsset?
@@ -428,14 +435,9 @@ final class EditorModel: ObservableObject {
         let renderSize = videoRenderSize
         guard renderSize.width > 1, renderSize.height > 1 else { return nil }
 
-        let baseTransform = sourceVideoTrack?.preferredTransform ?? .identity
         let trailTimes = MotionBlurMath.trailTimes(at: time, settings: motionBlurSettings)
         let trail: [CursorTrailSample] = trailTimes.compactMap { sample in
-            let point = displayCursorPoint(
-                at: sample.time,
-                renderSize: renderSize,
-                baseTransform: baseTransform
-            )
+            let point = displayCursorPoint(at: sample.time, renderSize: renderSize)
             return CursorTrailSample(
                 normalizedPosition: CGPoint(
                     x: point.x / renderSize.width,
@@ -567,7 +569,21 @@ final class EditorModel: ObservableObject {
         guard FileManager.default.fileExists(atPath: trackURL.path) else { return [] }
         do {
             let data = try Data(contentsOf: trackURL)
-            return try JSONDecoder().decode([CursorPosition].self, from: data)
+            // v2+: { version, coordinateSpace, samples } in video top-left space.
+            if let file = try? JSONDecoder().decode(CursorTrackFile.self, from: data) {
+                if file.coordinateSpace == CursorTrackFile.videoTopLeft || file.version >= 2 {
+                    return file.samples
+                }
+                // Explicit cocoa space in a versioned file.
+                return file.samples.map { sample in
+                    CursorPosition(time: sample.time, x: sample.x, y: 1 - sample.y)
+                }
+            }
+            // Legacy bare array: Cocoa bottom-left → convert to video top-left.
+            let legacy = try JSONDecoder().decode([CursorPosition].self, from: data)
+            return legacy.map { sample in
+                CursorPosition(time: sample.time, x: sample.x, y: 1 - sample.y)
+            }
         } catch {
             print("Failed to load cursor track: \(error)")
             return []
@@ -739,15 +755,19 @@ final class EditorModel: ObservableObject {
         videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
 
         let baseTransform = preferred
+        compositionBaseTransform = baseTransform
+        // One keyframe timeline shared by video + cursor overlay (critical for lock-on).
+        let samples = buildZoomTransformSamples(
+            baseTransform: baseTransform,
+            renderSize: renderSize,
+            duration: duration.seconds
+        )
+        zoomTransformSamples = samples
+
         let zoomBlur = motionBlurSettings.zoomStrength
 
         if zoomBlur > 0.001 {
             // Custom compositor applies zoom + directional motion blur (preview + export).
-            let samples = buildZoomTransformSamples(
-                baseTransform: baseTransform,
-                renderSize: renderSize,
-                duration: duration.seconds
-            )
             let instruction = ViewioCompositionInstruction(
                 timeRange: CMTimeRange(start: .zero, duration: duration),
                 sourceTrackID: compositionTrack.trackID,
@@ -766,9 +786,9 @@ final class EditorModel: ObservableObject {
                 layerInstruction.setTransform(baseTransform, at: .zero)
             } else {
                 applyZoomRamps(
+                    from: samples,
                     to: layerInstruction,
                     baseTransform: baseTransform,
-                    renderSize: renderSize,
                     compositionDuration: duration
                 )
             }
@@ -792,7 +812,7 @@ final class EditorModel: ObservableObject {
                     guard let self else {
                         return CGPoint(x: renderSize.width / 2, y: renderSize.height / 2)
                     }
-                    return self.displayCursorPoint(at: time, renderSize: renderSize, baseTransform: baseTransform)
+                    return self.displayCursorPoint(at: time, renderSize: renderSize)
                 }
             )
         }
@@ -800,28 +820,40 @@ final class EditorModel: ObservableObject {
         return videoComposition
     }
 
-    /// Dense transform samples for the custom motion-blur compositor.
+    /// Dense transform samples for video composition AND cursor overlay.
     private func buildZoomTransformSamples(
         baseTransform: CGAffineTransform,
         renderSize: CGSize,
         duration: Double
     ) -> [ZoomTransformSample] {
+        // 30fps is dense enough that linear ramps ≈ evaluating the zoom function live,
+        // so the overlay tip stays locked to the pixels under it.
         let step = 1.0 / 30.0
-        var samples: [ZoomTransformSample] = []
-        samples.reserveCapacity(Int(duration / step) + 3)
+        var times: [Double] = [0, duration]
+        for range in zoomRanges {
+            let start = max(0, range.start)
+            let end = min(duration, range.end)
+            guard end > start else { continue }
+            var t = start
+            while t <= end {
+                times.append(t)
+                t += step
+            }
+            times.append(end)
+            // Settle identity just after exit.
+            times.append(min(duration, end + step))
+        }
+        times = Array(Set(times.map { ($0 * 1000).rounded() / 1000 })).sorted()
 
-        var t = 0.0
-        while t <= duration + 0.0001 {
-            let time = min(duration, t)
+        return times.map { time in
             let scale: CGFloat
             let focus: CGPoint
             let zoom: CGAffineTransform
 
-            if let range = zoomRanges.first(where: { time >= $0.start && time <= $0.end }) {
+            if let range = zoomRanges.first(where: { time + 0.0001 >= $0.start && time <= $0.end + 0.0001 }) {
                 let length = max(0.001, range.end - range.start)
                 let transition = transitionDuration(for: range, totalDuration: length)
                 scale = zoomScale(at: time, range: range, transition: transition)
-                // Live cursor focus so the pointer stays inside the zoomed view.
                 focus = zoomFocus(at: time, in: range)
                 zoom = zoomTransform(
                     renderSize: renderSize,
@@ -836,26 +868,14 @@ final class EditorModel: ObservableObject {
             }
 
             let transform = finiteTransform(baseTransform.concatenating(zoom)) ?? baseTransform
-            samples.append(
-                ZoomTransformSample(time: time, transform: transform, focus: focus, scale: scale)
-            )
-            t += step
+            return ZoomTransformSample(time: time, transform: transform, focus: focus, scale: scale)
         }
-
-        if samples.last.map({ $0.time < duration - 0.0001 }) ?? true {
-            samples.append(
-                ZoomTransformSample(
-                    time: duration,
-                    transform: baseTransform,
-                    focus: CGPoint(x: 0.5, y: 0.5),
-                    scale: 1
-                )
-            )
-        }
-        return samples
     }
 
     private func refreshProcessedCursorTrack() {
+        // Precise: where the system cursor actually was (for drawing on UI).
+        preciseCursorTrack = CursorMotion.process(track: cursorTrack, motion: .precise)
+        // Smoothed: softer camera path only (never used for the drawn tip).
         processedCursorTrack = CursorMotion.process(
             track: cursorTrack,
             motion: cursorSettings.motion
@@ -865,56 +885,36 @@ final class EditorModel: ObservableObject {
     /// Final on-screen cursor point in layer coordinates (top-left origin via geometryFlipped).
     private func displayCursorPoint(
         at time: Double,
-        renderSize: CGSize,
-        baseTransform: CGAffineTransform
+        renderSize: CGSize
     ) -> CGPoint {
-        let normalized = cursorPosition(at: time)
+        // Always use the precise track so the tip matches the recording position.
+        let normalized = preciseCursorPosition(at: time)
         let sourcePoint = CGPoint(
             x: normalized.x * renderSize.width,
             y: normalized.y * renderSize.height
         )
 
-        // Match video composition: baseTransform.concatenating(zoom).
-        let zoom = activeZoomTransform(at: time, renderSize: renderSize)
-        let transformed = sourcePoint.applying(baseTransform.concatenating(zoom))
-
-        // Keep the tip on-screen with a small margin so the glyph doesn't spill
-        // into letterboxing / off the frame.
-        let marginX = min(renderSize.width * 0.04, 36)
-        let marginY = min(renderSize.height * 0.04, 36)
-        return CGPoint(
-            x: min(renderSize.width - marginX, max(marginX, transformed.x)),
-            y: min(renderSize.height - marginY, max(marginY, transformed.y))
-        )
-    }
-
-    private func activeZoomTransform(at time: Double, renderSize: CGSize) -> CGAffineTransform {
-        guard let range = zoomRanges.first(where: { time >= $0.start && time <= $0.end }) else {
-            return .identity
+        // CRITICAL: use the same interpolated transform as the video composition.
+        // Computing zoom live here while the player linearly ramps between sparse
+        // keyframes made the cursor drift whenever zoom was active.
+        let transform: CGAffineTransform
+        if zoomTransformSamples.isEmpty {
+            transform = compositionBaseTransform
+        } else {
+            transform = ZoomTransformSample.interpolate(at: time, in: zoomTransformSamples).transform
         }
-        let rangeDuration = max(0.001, range.end - range.start)
-        let transition = transitionDuration(for: range, totalDuration: rangeDuration)
-        let scale = zoomScale(at: time, range: range, transition: transition)
-        // Follow the live cursor so it stays inside the zoomed frame.
-        let center = zoomFocus(at: time, in: range)
-        return zoomTransform(
-            renderSize: renderSize,
-            scale: scale,
-            center: center,
-            targetAmount: CGFloat(min(3, max(1, range.amount)))
+        let transformed = sourcePoint.applying(transform)
+
+        return CGPoint(
+            x: min(renderSize.width, max(0, transformed.x)),
+            y: min(renderSize.height, max(0, transformed.y))
         )
     }
 
-    /// Camera focus for a moment inside a zoom range: track the cursor, with a
-    /// light blend toward the scene centroid so micro-jitter is reduced.
+    /// Camera focus: track the real cursor so the pointer stays in frame.
     private func zoomFocus(at time: Double, in range: ZoomRange) -> CGPoint {
-        let live = cursorPosition(at: time)
-        let scene = focusPoint(for: range)
-        // Mostly live so the pointer never races out of frame.
-        return CGPoint(
-            x: live.x * 0.88 + scene.x * 0.12,
-            y: live.y * 0.88 + scene.y * 0.12
-        )
+        // Use precise position for focus so zoom and cursor tip share the same point.
+        preciseCursorPosition(at: time)
     }
 
     /// Builds a transform that scales the frame and keeps the focus point at the
@@ -932,9 +932,6 @@ final class EditorModel: ObservableObject {
             return .identity
         }
 
-        let midX = renderSize.width / 2
-        let midY = renderSize.height / 2
-
         // Clamp focus so (1) we never show black bars and (2) the true cursor
         // still lands inside the visible window when near screen edges.
         let half = 0.5 / Double(safeScale)
@@ -947,30 +944,28 @@ final class EditorModel: ObservableObject {
         let anchorX = CGFloat(clampedX) * renderSize.width
         let anchorY = CGFloat(clampedY) * renderSize.height
 
-        // Animate pan with zoom-in so scale=1 stays identity, and at full zoom
-        // the focus point sits at the frame center.
-        let amount = max(CGFloat(min(3, max(1, Double(targetAmount)))), safeScale)
-        let panProgress = min(1, max(0, (safeScale - 1) / max(0.0001, amount - 1)))
-
-        // T * p = scale * p + (1 - scale) * anchor + (mid - anchor) * panProgress
-        let tx = (1 - safeScale) * anchorX + (midX - anchorX) * panProgress
-        let ty = (1 - safeScale) * anchorY + (midY - anchorY) * panProgress
+        // Keep the focus anchored at the clamped cursor point. Previously the
+        // focus panned toward the frame center as scale increased, which moved
+        // the cursor on screen and made it look offset between zoomed and
+        // unzoomed frames.
+        // T * p = scale * p + (1 - scale) * anchor
+        let tx = (1 - safeScale) * anchorX
+        let ty = (1 - safeScale) * anchorY
         return CGAffineTransform(a: safeScale, b: 0, c: 0, d: safeScale, tx: tx, ty: ty)
     }
 
-    /// Cursor position in normalized video coordinates (origin top-left, 0...1).
+    /// Precise tip position in normalized video coordinates (origin top-left, 0...1).
+    /// Does not apply cinematic/smooth lag — that only affects optional camera styles.
+    private func preciseCursorPosition(at time: Double) -> CGPoint {
+        let track = preciseCursorTrack.isEmpty
+            ? CursorMotion.process(track: cursorTrack, motion: .precise)
+            : preciseCursorTrack
+        return CursorMotion.position(at: time, in: track, motion: .precise)
+    }
+
+    /// Cursor position used for zoom framing (precise; kept as a named alias).
     private func cursorPosition(at time: Double) -> CGPoint {
-        if !processedCursorTrack.isEmpty {
-            return CursorMotion.position(
-                at: time,
-                in: processedCursorTrack,
-                motion: cursorSettings.motion
-            )
-        }
-        // Fallback when motion pipeline has not run yet.
-        guard !cursorTrack.isEmpty else { return CGPoint(x: 0.5, y: 0.5) }
-        let raw = CursorMotion.process(track: cursorTrack, motion: .natural)
-        return CursorMotion.position(at: time, in: raw, motion: .natural)
+        preciseCursorPosition(at: time)
     }
 
     private func cursorPositions(in timeRange: ClosedRange<Double>) -> [CursorPosition] {
@@ -1006,125 +1001,49 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    /// Sparse, strictly-valid transform ramps. Dense per-frame ramps and mixed
-    /// setTransform/setTransformRamp usage cause VRP err=-12852.
+    /// Apply the shared zoom sample timeline as non-overlapping transform ramps.
     private func applyZoomRamps(
+        from samples: [ZoomTransformSample],
         to layerInstruction: AVMutableVideoCompositionLayerInstruction,
         baseTransform: CGAffineTransform,
-        renderSize: CGSize,
         compositionDuration: CMTime
     ) {
         let timescale: CMTimeScale = 600
         let total = CMTimeConvertScale(compositionDuration, timescale: timescale, method: .default)
-        let totalSeconds = total.seconds
-        guard totalSeconds > 0.05, total.isValid, !total.seconds.isNaN else {
+        guard total.seconds > 0.05, total.isValid, !samples.isEmpty else {
             layerInstruction.setTransform(baseTransform, at: .zero)
             return
         }
 
         let safeBase = finiteTransform(baseTransform) ?? .identity
-        let ranges = nonOverlappingZoomRanges(duration: totalSeconds)
-        guard !ranges.isEmpty else {
-            layerInstruction.setTransform(safeBase, at: .zero)
-            return
-        }
-
-        struct Keyframe {
-            var time: CMTime
-            var transform: CGAffineTransform
-        }
-
-        var keyframes: [Keyframe] = [
-            Keyframe(time: .zero, transform: safeBase)
-        ]
-
-        func append(_ seconds: Double, _ transform: CGAffineTransform) {
-            var t = CMTime(seconds: min(totalSeconds, max(0, seconds)), preferredTimescale: timescale)
-            if CMTimeCompare(t, total) > 0 { t = total }
-            if CMTimeCompare(t, .zero) < 0 { t = .zero }
-
-            guard let xf = finiteTransform(transform) else { return }
-
-            if let last = keyframes.last {
-                let cmp = CMTimeCompare(t, last.time)
-                if cmp < 0 { return }
-                if cmp == 0 {
-                    keyframes[keyframes.count - 1] = Keyframe(time: t, transform: xf)
-                    return
-                }
-            }
-            keyframes.append(Keyframe(time: t, transform: xf))
-        }
-
-        for range in ranges {
-            let length = range.end - range.start
-            guard length > 0.08 else { continue }
-
-            let transition = min(
-                transitionDuration(for: range, totalDuration: length),
-                length * 0.45
-            )
-            let amount = CGFloat(min(2.5, max(1.15, range.amount)))
-
-            func transform(scale: CGFloat, at time: Double) -> CGAffineTransform {
-                let center = zoomFocus(at: time, in: range)
-                let zoom = zoomTransform(
-                    renderSize: renderSize,
-                    scale: scale,
-                    center: center,
-                    targetAmount: amount
-                )
-                return safeBase.concatenating(zoom)
-            }
-
-            let entryEnd = range.start + transition
-            let exitStart = range.end - transition
-
-            append(range.start, safeBase)
-            append(entryEnd, transform(scale: amount, at: entryEnd))
-
-            // Sparse live-follow samples so the camera tracks the cursor mid-zoom.
-            if exitStart - entryEnd > 0.35 {
-                var sample = entryEnd + 0.28
-                while sample < exitStart - 0.05 {
-                    append(sample, transform(scale: amount, at: sample))
-                    sample += 0.28
-                }
-                append(exitStart, transform(scale: amount, at: exitStart))
-            } else if exitStart > entryEnd + 0.05 {
-                append(exitStart, transform(scale: amount, at: exitStart))
-            }
-
-            append(range.end, safeBase)
-        }
-
-        if let last = keyframes.last, CMTimeCompare(last.time, total) < 0 {
-            keyframes.append(Keyframe(time: total, transform: safeBase))
-        }
-
         var rampCount = 0
-        for index in 0..<(keyframes.count - 1) {
-            let from = keyframes[index]
-            let to = keyframes[index + 1]
-            guard CMTimeCompare(to.time, from.time) > 0 else { continue }
 
-            let timeRange = CMTimeRange(start: from.time, end: to.time)
-            guard timeRange.duration.isValid,
-                  CMTimeCompare(timeRange.duration, .zero) > 0 else {
-                continue
-            }
+        for index in 0..<(samples.count - 1) {
+            let from = samples[index]
+            let to = samples[index + 1]
+            guard to.time > from.time + 0.0005 else { continue }
 
-            let instructionRange = CMTimeRange(start: .zero, duration: total)
-            let clamped = instructionRange.intersection(timeRange)
+            var start = CMTime(seconds: from.time, preferredTimescale: timescale)
+            var end = CMTime(seconds: to.time, preferredTimescale: timescale)
+            if CMTimeCompare(start, .zero) < 0 { start = .zero }
+            if CMTimeCompare(end, total) > 0 { end = total }
+            guard CMTimeCompare(end, start) > 0 else { continue }
+
+            let range = CMTimeRange(start: start, end: end)
+            let clamped = CMTimeRange(start: .zero, duration: total).intersection(range)
             guard CMTimeCompare(clamped.duration, .zero) > 0 else { continue }
 
+            let fromXF = finiteTransform(from.transform) ?? safeBase
+            let toXF = finiteTransform(to.transform) ?? safeBase
+
             layerInstruction.setTransformRamp(
-                fromStart: from.transform,
-                toEnd: to.transform,
+                fromStart: fromXF,
+                toEnd: toXF,
                 timeRange: clamped
             )
             rampCount += 1
-            if rampCount >= 40 { break }
+            // Hard cap for compositor stability on very long timelines.
+            if rampCount >= 400 { break }
         }
 
         if rampCount == 0 {
@@ -1145,13 +1064,14 @@ final class EditorModel: ObservableObject {
 
     /// Average cursor position in a range (stable zoom anchor).
     private func focusPoint(for range: ZoomRange) -> CGPoint {
-        let samples = cursorPositions(in: range.start...range.end)
+        // Prefer precise video-space track.
+        let track = preciseCursorTrack.isEmpty ? cursorTrack : preciseCursorTrack
+        let samples = track.filter { $0.time >= range.start && $0.time <= range.end }
         if samples.isEmpty {
-            return cursorPosition(at: (range.start + range.end) / 2)
+            return preciseCursorPosition(at: (range.start + range.end) / 2)
         }
-        // Convert Cocoa Y → video Y the same way as CursorMotion.process.
         let xs = samples.map(\.x)
-        let ys = samples.map { 1 - $0.y }
+        let ys = samples.map(\.y)
         let x = xs.reduce(0, +) / Double(xs.count)
         let y = ys.reduce(0, +) / Double(ys.count)
         return CGPoint(

@@ -123,6 +123,19 @@ struct CursorPosition: Codable, Equatable {
     let y: Double
 }
 
+/// On-disk cursor track. v2 stores normalized video coords (origin top-left).
+/// Legacy files are a bare `[CursorPosition]` array in Cocoa space (origin bottom-left).
+struct CursorTrackFile: Codable, Equatable {
+    var version: Int
+    /// "videoTopLeft" (v2+) or "cocoaBottomLeft" (legacy).
+    var coordinateSpace: String
+    var samples: [CursorPosition]
+
+    static let currentVersion = 2
+    static let videoTopLeft = "videoTopLeft"
+    static let cocoaBottomLeft = "cocoaBottomLeft"
+}
+
 struct ClickEvent: Codable, Equatable {
     let time: TimeInterval
     let button: Int
@@ -159,7 +172,11 @@ final class RecordingController: NSObject, ObservableObject {
     private var cursorTrack: [CursorPosition] = []
     private var clickEvents: [ClickEvent] = []
     private var recordedDisplayID: CGDirectDisplayID?
+    /// Global Cocoa bounds (points, origin bottom-left) of the captured display.
+    private var captureBounds: CGRect = .zero
     private var wasLeftButtonDown = false
+    /// Host time when capture is considered started (aligns cursor track to video).
+    private var recordingHostStart: TimeInterval?
 
     var isRecording: Bool {
         switch state {
@@ -240,6 +257,8 @@ final class RecordingController: NSObject, ObservableObject {
             display = displays[0]
         }
         recordedDisplayID = display.displayID
+        // Prefer NSScreen.frame (same space as NSEvent.mouseLocation) for tracking.
+        captureBounds = displayBoundsInCocoaSpace(displayID: display.displayID)
 
         let outputURL = try makeOutputURL()
         let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -262,8 +281,10 @@ final class RecordingController: NSObject, ObservableObject {
             height: max(nativeFromFilter.height, nativeFromDisplay.height)
         )
         let outputSize = selectedResolution.outputSize(forNative: nativeSize)
-        configuration.width = max(2, Int(outputSize.width.rounded()))
-        configuration.height = max(2, Int(outputSize.height.rounded()))
+        // Keep exact aspect of the display so scalesToFit never letterboxes
+        // (letterboxing would desync normalized cursor coords from pixels).
+        configuration.width = max(2, Int(outputSize.width.rounded()) & ~1)
+        configuration.height = max(2, Int(outputSize.height.rounded()) & ~1)
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: selectedFrameRate.timescale)
         configuration.queueDepth = 8
         // BGRA keeps sharp UI text better than subsampled YUV for screen content.
@@ -331,9 +352,24 @@ final class RecordingController: NSObject, ObservableObject {
     private func recordingDidStart() {
         guard case .preparing = state else { return }
         state = .recording
-        startedAt = .now
+        let now = Date()
+        startedAt = now
+        recordingHostStart = ProcessInfo.processInfo.systemUptime
         startTimer()
         startCursorTracking()
+    }
+
+    /// Global display bounds in the same Cocoa point space as `NSEvent.mouseLocation`.
+    private func displayBoundsInCocoaSpace(displayID: CGDirectDisplayID) -> CGRect {
+        if let screen = NSScreen.screens.first(where: { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
+            return number.uint32Value == displayID
+        }) {
+            return screen.frame
+        }
+        return CGDisplayBounds(displayID)
     }
 
     private func recordingDidFinish() {
@@ -377,27 +413,39 @@ final class RecordingController: NSObject, ObservableObject {
         cursorTrack = []
         clickEvents = []
         wasLeftButtonDown = false
-        guard let recordedDisplayID else { return }
-        let bounds = CGDisplayBounds(recordedDisplayID)
+        guard recordedDisplayID != nil, captureBounds.width > 1, captureBounds.height > 1 else { return }
+        let bounds = captureBounds
 
         // Sample cursor at least as often as capture FPS (capped for overhead).
         let cursorHz = min(60.0, max(30.0, Double(selectedFrameRate.rawValue)))
-        cursorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / cursorHz, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let startedAt = self.startedAt else { return }
-                let location = NSEvent.mouseLocation
-                let relativeX = (location.x - bounds.origin.x) / bounds.width
-                let relativeY = (location.y - bounds.origin.y) / bounds.height
-                let time = Date().timeIntervalSince(startedAt)
-                let position = CursorPosition(
-                    time: time,
-                    x: max(0, min(1, relativeX)),
-                    y: max(0, min(1, relativeY))
-                )
-                self.cursorTrack.append(position)
-                self.recordClickIfNeeded(at: time)
+        // Main run loop + common modes so tracking continues during UI tracking loops.
+        let timer = Timer(timeInterval: 1.0 / cursorHz, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.sampleCursor(bounds: bounds)
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        cursorTimer = timer
+        // Immediate sample at t≈0 so the first frame is aligned.
+        sampleCursor(bounds: bounds)
+    }
+
+    private func sampleCursor(bounds: CGRect) {
+        guard let hostStart = recordingHostStart else { return }
+        // NSEvent.mouseLocation is the cursor *hotspot* in global Cocoa points.
+        let location = NSEvent.mouseLocation
+        let relativeX = (location.x - bounds.origin.x) / bounds.width
+        // Cocoa Y is bottom-up; store already flipped to video top-left (0 = top)
+        // so playback never double-flips or mixes conventions.
+        let relativeYFromTop = 1 - (location.y - bounds.origin.y) / bounds.height
+        let time = ProcessInfo.processInfo.systemUptime - hostStart
+        let position = CursorPosition(
+            time: max(0, time),
+            x: max(0, min(1, relativeX)),
+            y: max(0, min(1, relativeYFromTop))
+        )
+        cursorTrack.append(position)
+        recordClickIfNeeded(at: position.time)
     }
 
     private func recordClickIfNeeded(at time: TimeInterval) {
@@ -417,7 +465,14 @@ final class RecordingController: NSObject, ObservableObject {
         guard !cursorTrack.isEmpty else { return }
         let trackURL = videoURL.deletingPathExtension().appendingPathExtension("cursor.json")
         do {
-            let data = try JSONEncoder().encode(cursorTrack)
+            let file = CursorTrackFile(
+                version: CursorTrackFile.currentVersion,
+                coordinateSpace: CursorTrackFile.videoTopLeft,
+                samples: cursorTrack
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(file)
             try data.write(to: trackURL)
         } catch {
             print("Failed to save cursor track: \(error)")
@@ -437,10 +492,12 @@ final class RecordingController: NSObject, ObservableObject {
         stream = nil
         recordingOutput = nil
         startedAt = nil
+        recordingHostStart = nil
         elapsed = 0
         cursorTrack = []
         clickEvents = []
         recordedDisplayID = nil
+        captureBounds = .zero
         wasLeftButtonDown = false
         if !keepingOutputURL {
             outputURL = nil
