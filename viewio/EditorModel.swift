@@ -932,22 +932,15 @@ final class EditorModel: ObservableObject {
             return .identity
         }
 
-        // Clamp focus so (1) we never show black bars and (2) the true cursor
-        // still lands inside the visible window when near screen edges.
-        let half = 0.5 / Double(safeScale)
-        // Slightly tighter than `half` so the tip isn't glued to the crop edge.
-        let inset = min(0.49, half * 0.92)
+        // Focus exactly on the cursor so the zoom camera follows it and the
+        // pointer stays in view. Clamping the focus inward prevented black bars
+        // but pushed the cursor toward the crop edge, where the arrow image
+        // got clipped and looked like it disappeared.
         let rawX = Double(center.x.isFinite ? center.x : 0.5)
         let rawY = Double(center.y.isFinite ? center.y : 0.5)
-        let clampedX = min(1 - inset, max(inset, rawX))
-        let clampedY = min(1 - inset, max(inset, rawY))
-        let anchorX = CGFloat(clampedX) * renderSize.width
-        let anchorY = CGFloat(clampedY) * renderSize.height
+        let anchorX = CGFloat(rawX) * renderSize.width
+        let anchorY = CGFloat(rawY) * renderSize.height
 
-        // Keep the focus anchored at the clamped cursor point. Previously the
-        // focus panned toward the frame center as scale increased, which moved
-        // the cursor on screen and made it look offset between zoomed and
-        // unzoomed frames.
         // T * p = scale * p + (1 - scale) * anchor
         let tx = (1 - safeScale) * anchorX
         let ty = (1 - safeScale) * anchorY
