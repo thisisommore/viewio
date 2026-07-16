@@ -614,9 +614,16 @@ private struct CursorPlayerOverlay: View {
             let container = geometry.size
             let render = model.videoRenderSize
             // Prefer the live AVPlayerLayer rect; fall back to aspect-fit math.
+            // AVPlayerLayer.videoRect is in CALayer bottom-left coordinates, but
+            // this overlay is drawn by SwiftUI which uses top-left coordinates.
             let videoRect: CGRect = {
                 if playerVideoRect.width > 2, playerVideoRect.height > 2 {
-                    return playerVideoRect
+                    return CGRect(
+                        x: playerVideoRect.minX,
+                        y: container.height - playerVideoRect.maxY,
+                        width: playerVideoRect.width,
+                        height: playerVideoRect.height
+                    )
                 }
                 return letterboxedRect(aspect: render, in: container)
             }()
@@ -664,9 +671,11 @@ private struct CursorPlayerOverlay: View {
     }
 
     private func tipPoint(normalized: CGPoint, in videoRect: CGRect) -> CGPoint {
+        // Coordinates are relative to the inner ZStack, whose origin is already
+        // at videoRect.minX/minY via its .position(videoRect.mid) frame.
         CGPoint(
-            x: videoRect.minX + min(1, max(0, normalized.x)) * videoRect.width,
-            y: videoRect.minY + min(1, max(0, normalized.y)) * videoRect.height
+            x: min(1, max(0, normalized.x)) * videoRect.width,
+            y: min(1, max(0, normalized.y)) * videoRect.height
         )
     }
 
