@@ -80,6 +80,13 @@ enum RecordingResolution: String, CaseIterable, Identifiable {
         return evenSize(CGSize(width: width * scale, height: height * scale))
     }
 
+    /// True when this preset would not change capture size for `native`.
+    func isLimitedByDisplay(_ native: CGSize) -> Bool {
+        guard maxSize != nil else { return false }
+        let out = outputSize(forNative: native)
+        return abs(out.width - native.width) < 1 && abs(out.height - native.height) < 1
+    }
+
     private func evenSize(_ size: CGSize) -> CGSize {
         CGSize(
             width: max(2, (size.width / 2).rounded(.down) * 2),
@@ -238,15 +245,31 @@ final class RecordingController: NSObject, ObservableObject {
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let configuration = SCStreamConfiguration()
 
-        let nativeSize = CGSize(
+        // Prefer filter metrics (points × pixel scale) so Retina displays capture
+        // at true pixel density, not the SCStream default 1920×1080.
+        let scale = CGFloat(filter.pointPixelScale)
+        let nativeFromFilter = CGSize(
+            width: filter.contentRect.width * scale,
+            height: filter.contentRect.height * scale
+        )
+        let nativeFromDisplay = CGSize(
             width: CGDisplayPixelsWide(display.displayID),
             height: CGDisplayPixelsHigh(display.displayID)
         )
+        // Use the larger of the two estimates (guards against odd filter rects).
+        let nativeSize = CGSize(
+            width: max(nativeFromFilter.width, nativeFromDisplay.width),
+            height: max(nativeFromFilter.height, nativeFromDisplay.height)
+        )
         let outputSize = selectedResolution.outputSize(forNative: nativeSize)
-        configuration.width = Int(outputSize.width)
-        configuration.height = Int(outputSize.height)
+        configuration.width = max(2, Int(outputSize.width.rounded()))
+        configuration.height = max(2, Int(outputSize.height.rounded()))
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: selectedFrameRate.timescale)
-        configuration.queueDepth = 5
+        configuration.queueDepth = 8
+        // BGRA keeps sharp UI text better than subsampled YUV for screen content.
+        configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        configuration.scalesToFit = true
+        configuration.preservesAspectRatio = true
         // Hide the system cursor in the captured frames so the editor can redraw
         // a custom, animated cursor from the separately tracked path.
         configuration.showsCursor = false
@@ -259,7 +282,13 @@ final class RecordingController: NSObject, ObservableObject {
         let recordingConfiguration = SCRecordingOutputConfiguration()
         recordingConfiguration.outputURL = outputURL
         recordingConfiguration.outputFileType = .mp4
-        recordingConfiguration.videoCodecType = .h264
+        // HEVC is much sharper than H.264 at ScreenCaptureKit's default bitrates.
+        let hevc = AVVideoCodecType.hevc
+        if recordingConfiguration.availableVideoCodecTypes.contains(hevc) {
+            recordingConfiguration.videoCodecType = hevc
+        } else {
+            recordingConfiguration.videoCodecType = .h264
+        }
 
         let recordingOutput = SCRecordingOutput(
             configuration: recordingConfiguration,

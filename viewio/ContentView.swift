@@ -240,8 +240,18 @@ private struct VideoQualityOptionsView: View {
             height: CGDisplayPixelsHigh(display.id)
         )
         let out = recorder.selectedResolution.outputSize(forNative: native)
+        let isClamped = recorder.selectedResolution != .native
+            && abs(out.width - native.width) < 1
+            && abs(out.height - native.height) < 1
+            && recorder.selectedResolution.maxSize != nil
+        if isClamped {
+            return String(
+                format: "Display is %.0f×%.0f — this preset can’t go higher, so capture stays at native.",
+                native.width, native.height
+            )
+        }
         return String(
-            format: "Output ≈ %.0f×%.0f (display %.0f×%.0f). Never upscaled past native.",
+            format: "Will capture ≈ %.0f×%.0f (display %.0f×%.0f).",
             out.width, out.height, native.width, native.height
         )
     }
@@ -447,11 +457,21 @@ private struct PlayerView: NSViewRepresentable {
         playerView.player = player
         playerView.controlsStyle = .none
         playerView.videoGravity = .resizeAspect
+        // Prefer sharp downscale of high-res captures in the preview pane.
+        playerView.wantsLayer = true
+        playerView.layer?.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        playerView.layer?.minificationFilter = .trilinear
+        playerView.layer?.magnificationFilter = .trilinear
         return playerView
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
         nsView.player = player
+        if let item = player.currentItem {
+            // Don't throttle decode for a soft low-bitrate preview.
+            item.preferredPeakBitRate = 0
+            item.preferredMaximumResolution = CGSize(width: 8192, height: 8192)
+        }
     }
 }
 

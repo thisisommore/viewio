@@ -717,6 +717,9 @@ final class EditorModel: ObservableObject {
 
         let item = AVPlayerItem(asset: build.composition)
         item.videoComposition = build.videoComposition
+        // Full-quality preview decode (avoid soft low-bitrate streaming defaults).
+        item.preferredPeakBitRate = 0
+        item.preferredMaximumResolution = CGSize(width: 8192, height: 8192)
         player.replaceCurrentItem(with: item)
         duration = build.duration
         videoRenderSize = build.renderSize
