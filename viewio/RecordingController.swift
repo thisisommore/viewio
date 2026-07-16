@@ -29,6 +29,31 @@ struct DisplayInfo: Identifiable, Equatable {
     var idValue: UInt32 { id }
 }
 
+struct WindowInfo: Identifiable, Equatable {
+    let id: CGWindowID
+    let title: String
+    let appName: String
+    /// Frame in Core Graphics global space (top-left origin).
+    let frame: CGRect
+    let isOnScreen: Bool
+
+    var idValue: UInt32 { id }
+}
+
+enum CaptureMode: String, CaseIterable, Identifiable {
+    case display
+    case window
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .display: "Full Screen"
+        case .window: "Window"
+        }
+    }
+}
+
 /// Output resolution for screen capture (scaled to fit the display aspect ratio).
 enum RecordingResolution: String, CaseIterable, Identifiable {
     case native
@@ -167,8 +192,17 @@ final class RecordingController: NSObject, ObservableObject {
     @Published private(set) var availableCameras: [CameraDevice] = []
     @Published var selectedMicrophoneID: String?
     @Published private(set) var availableMicrophones: [AudioDevice] = []
+    @Published var captureMode: CaptureMode = .display {
+        didSet {
+            if captureMode == .window {
+                discoverWindows()
+            }
+        }
+    }
     @Published var selectedDisplayID: CGDirectDisplayID?
     @Published private(set) var availableDisplays: [DisplayInfo] = []
+    @Published var selectedWindowID: CGWindowID?
+    @Published private(set) var availableWindows: [WindowInfo] = []
     @Published var selectedResolution: RecordingResolution = .native
     @Published var selectedFrameRate: RecordingFrameRate = .fps60
     @Published var cameraCorner: CameraCorner = .bottomRight
@@ -205,6 +239,7 @@ final class RecordingController: NSObject, ObservableObject {
     override init() {
         super.init()
         discoverDisplays()
+        discoverWindows()
         discoverCameras()
         discoverMicrophones()
     }
@@ -273,16 +308,32 @@ final class RecordingController: NSObject, ObservableObject {
             throw RecordingError.noDisplay
         }
 
-        let display: SCDisplay
-        if let selectedDisplayID,
-           let selected = displays.first(where: { $0.displayID == selectedDisplayID }) {
-            display = selected
+        // Resolve the target display and the content filter up front. For window
+        // capture we lock the cursor bounds to the window frame; for display
+        // capture we use the selected display.
+        let targetDisplayID: CGDirectDisplayID
+        let capturedWindow: SCWindow?
+        if captureMode == .window {
+            guard let selectedWindowID,
+                  let window = content.windows.first(where: { $0.windowID == selectedWindowID }) else {
+                throw RecordingError.noWindow
+            }
+            capturedWindow = window
+            captureBounds = cocoaFrame(forWindowFrame: window.frame)
+            targetDisplayID = displayIDContainingWindow(frameInCGSpace: window.frame) ?? displays[0].displayID
         } else {
-            display = displays[0]
+            capturedWindow = nil
+            let display: SCDisplay
+            if let selectedDisplayID,
+               let selected = displays.first(where: { $0.displayID == selectedDisplayID }) {
+                display = selected
+            } else {
+                display = displays[0]
+            }
+            targetDisplayID = display.displayID
+            captureBounds = displayBoundsInCocoaSpace(displayID: display.displayID)
         }
-        recordedDisplayID = display.displayID
-        // Prefer NSScreen.frame (same space as NSEvent.mouseLocation) for tracking.
-        captureBounds = displayBoundsInCocoaSpace(displayID: display.displayID)
+        recordedDisplayID = targetDisplayID
 
         let outputURL = try makeOutputURL()
         let cameraOutputURL = captureCamera ? cameraSidecarURL(for: outputURL) : nil
@@ -304,13 +355,13 @@ final class RecordingController: NSObject, ObservableObject {
 
         // Start the camera session early so its preview layer is ready, and
         // create the on-screen floating overlay before capturing content so we
-        // can exclude that window from the screen recording.
+        // can exclude that window from a full-screen recording.
         if captureCamera {
             let cameraRecorder = CameraRecorder(selectedDeviceID: selectedCameraID)
             self.cameraRecorder = cameraRecorder
             let overlay = CameraOverlayWindowController(
                 recorder: cameraRecorder,
-                displayID: display.displayID,
+                displayID: targetDisplayID,
                 corner: cameraCorner
             ) { [weak self] corner in
                 self?.cameraCorner = corner
@@ -319,38 +370,62 @@ final class RecordingController: NSObject, ObservableObject {
             overlay.show()
         }
 
-        // Re-fetch shareable content now that the overlay window is on screen
-        // so ScreenCaptureKit can see it and exclude it from the recording.
-        let captureContent = try await SCShareableContent.current
-        let excludedWindows: [SCWindow]
-        if let overlayWindow,
-           let windowNumber = overlayWindow.windowNumber,
-           let overlaySCWindow = captureContent.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
-            excludedWindows = [overlaySCWindow]
+        // Build the content filter. Full-screen capture needs a fresh lookup so
+        // the camera overlay window can be excluded; window capture records only
+        // the chosen window, so the overlay is naturally omitted.
+        let filter: SCContentFilter
+        let nativeSize: CGSize
+        if captureMode == .window, let window = capturedWindow {
+            filter = SCContentFilter(desktopIndependentWindow: window)
+            let scale = CGFloat(filter.pointPixelScale)
+            let nativeFromFilter = CGSize(
+                width: filter.contentRect.width * scale,
+                height: filter.contentRect.height * scale
+            )
+            let nativeFromWindow = CGSize(
+                width: window.frame.width * scale,
+                height: window.frame.height * scale
+            )
+            nativeSize = CGSize(
+                width: max(nativeFromFilter.width, nativeFromWindow.width),
+                height: max(nativeFromFilter.height, nativeFromWindow.height)
+            )
         } else {
-            excludedWindows = []
+            let captureContent = try await SCShareableContent.current
+            let excludedWindows: [SCWindow]
+            if let overlayWindow,
+               let windowNumber = overlayWindow.windowNumber,
+               let overlaySCWindow = captureContent.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
+                excludedWindows = [overlaySCWindow]
+            } else {
+                excludedWindows = []
+            }
+            let display: SCDisplay
+            if let selectedDisplayID,
+               let selected = captureContent.displays.first(where: { $0.displayID == selectedDisplayID }) {
+                display = selected
+            } else {
+                display = captureContent.displays[0]
+            }
+            filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
+            let scale = CGFloat(filter.pointPixelScale)
+            let nativeFromFilter = CGSize(
+                width: filter.contentRect.width * scale,
+                height: filter.contentRect.height * scale
+            )
+            let nativeFromDisplay = CGSize(
+                width: CGDisplayPixelsWide(display.displayID),
+                height: CGDisplayPixelsHigh(display.displayID)
+            )
+            nativeSize = CGSize(
+                width: max(nativeFromFilter.width, nativeFromDisplay.width),
+                height: max(nativeFromFilter.height, nativeFromDisplay.height)
+            )
         }
-        let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
         let configuration = SCStreamConfiguration()
 
-        // Prefer filter metrics (points × pixel scale) so Retina displays capture
-        // at true pixel density, not the SCStream default 1920×1080.
-        let scale = CGFloat(filter.pointPixelScale)
-        let nativeFromFilter = CGSize(
-            width: filter.contentRect.width * scale,
-            height: filter.contentRect.height * scale
-        )
-        let nativeFromDisplay = CGSize(
-            width: CGDisplayPixelsWide(display.displayID),
-            height: CGDisplayPixelsHigh(display.displayID)
-        )
-        // Use the larger of the two estimates (guards against odd filter rects).
-        let nativeSize = CGSize(
-            width: max(nativeFromFilter.width, nativeFromDisplay.width),
-            height: max(nativeFromFilter.height, nativeFromDisplay.height)
-        )
         let outputSize = selectedResolution.outputSize(forNative: nativeSize)
-        // Keep exact aspect of the display so scalesToFit never letterboxes
+        // Keep exact aspect of the source so scalesToFit never letterboxes
         // (letterboxing would desync normalized cursor coords from pixels).
         configuration.width = max(2, Int(outputSize.width.rounded()) & ~1)
         configuration.height = max(2, Int(outputSize.height.rounded()) & ~1)
@@ -452,6 +527,29 @@ final class RecordingController: NSObject, ObservableObject {
             return screen.frame
         }
         return CGDisplayBounds(displayID)
+    }
+
+    /// Converts a Core Graphics window frame (top-left origin global space) to
+    /// the Cocoa global point space used by `NSEvent.mouseLocation`.
+    private func cocoaFrame(forWindowFrame frame: CGRect) -> CGRect {
+        let mainBounds = CGDisplayBounds(CGMainDisplayID())
+        let cocoaY = mainBounds.height - (frame.origin.y + frame.size.height)
+        return CGRect(
+            x: frame.origin.x,
+            y: cocoaY,
+            width: frame.size.width,
+            height: frame.size.height
+        )
+    }
+
+    /// Returns the display ID that contains the given window frame.
+    private func displayIDContainingWindow(frameInCGSpace frame: CGRect) -> CGDirectDisplayID? {
+        let maxDisplays: UInt32 = 8
+        var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(maxDisplays))
+        var matchingCount: UInt32 = 0
+        let error = CGGetDisplaysWithRect(frame, maxDisplays, &displayIDs, &matchingCount)
+        guard error == .success, matchingCount > 0 else { return nil }
+        return displayIDs[0]
     }
 
     private func recordingDidFinish() {
@@ -715,6 +813,41 @@ final class RecordingController: NSObject, ObservableObject {
         }
     }
 
+    func discoverWindows() {
+        Task {
+            do {
+                let content = try await SCShareableContent.current
+                let ownBundleID = Bundle.main.bundleIdentifier
+                let windows = content.windows.compactMap { window -> WindowInfo? in
+                    guard window.isOnScreen else { return nil }
+                    let frame = window.frame
+                    guard frame.width > 32, frame.height > 32 else { return nil }
+                    if let app = window.owningApplication,
+                       app.bundleIdentifier == ownBundleID {
+                        return nil
+                    }
+                    return WindowInfo(
+                        id: window.windowID,
+                        title: window.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Untitled",
+                        appName: window.owningApplication?.applicationName ?? "Unknown",
+                        frame: frame,
+                        isOnScreen: window.isOnScreen
+                    )
+                }
+                await MainActor.run {
+                    self.availableWindows = windows
+                    if self.selectedWindowID == nil, let first = windows.first {
+                        self.selectedWindowID = first.id
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.availableWindows = []
+                }
+            }
+        }
+    }
+
     private func requestMicrophoneAuthorization() async -> Bool {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         switch status {
@@ -769,6 +902,7 @@ extension RecordingController: SCStreamDelegate {
 
 private enum RecordingError: LocalizedError {
     case noDisplay
+    case noWindow
     case microphoneDenied
     case cameraDenied
 
@@ -776,6 +910,8 @@ private enum RecordingError: LocalizedError {
         switch self {
         case .noDisplay:
             "No display is available to record."
+        case .noWindow:
+            "The selected window is no longer available. Choose another window and try again."
         case .microphoneDenied:
             "Microphone access was denied. Enable it in System Settings to record microphone audio."
         case .cameraDenied:

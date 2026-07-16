@@ -83,12 +83,12 @@ private struct RecordingStartView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("New Recording")
                             .font(.system(size: 26, weight: .bold))
-                        Text("Choose a display and audio sources, then start recording.")
+                        Text("Choose a capture source and audio sources, then start recording.")
                             .font(.system(size: 14))
                             .foregroundStyle(.secondary)
                     }
 
-                    DisplayOptionsView(recorder: recorder, isPreparing: isPreparing)
+                    CaptureOptionsView(recorder: recorder, isPreparing: isPreparing)
 
                     VideoQualityOptionsView(recorder: recorder, isPreparing: isPreparing)
 
@@ -152,29 +152,88 @@ private struct RecordButtonStyle: ButtonStyle {
     }
 }
 
-private struct DisplayOptionsView: View {
+private struct CaptureOptionsView: View {
     @ObservedObject var recorder: RecordingController
     let isPreparing: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Display")
+            sectionTitle("Capture Source")
 
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 120, maximum: 180), spacing: 12)],
-                alignment: .leading,
-                spacing: 12
-            ) {
-                ForEach(recorder.availableDisplays) { display in
-                    SelectionCard(
-                        title: display.name,
-                        isSelected: recorder.selectedDisplayID == display.id,
-                        isDisabled: isPreparing
-                    ) {
-                        recorder.selectedDisplayID = display.id
+            HStack(alignment: .top, spacing: 12) {
+                SelectionCard(
+                    title: CaptureMode.display.title,
+                    isSelected: recorder.captureMode == .display,
+                    isDisabled: isPreparing
+                ) {
+                    recorder.captureMode = .display
+                }
+                .frame(width: 116)
+
+                SelectionCard(
+                    title: CaptureMode.window.title,
+                    isSelected: recorder.captureMode == .window,
+                    isDisabled: isPreparing
+                ) {
+                    recorder.captureMode = .window
+                }
+                .frame(width: 116)
+            }
+
+            if recorder.captureMode == .display {
+                displayGrid
+            } else {
+                windowGrid
+            }
+        }
+    }
+
+    private var displayGrid: some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 120, maximum: 180), spacing: 12)],
+            alignment: .leading,
+            spacing: 12
+        ) {
+            ForEach(recorder.availableDisplays) { display in
+                SelectionCard(
+                    title: display.name,
+                    isSelected: recorder.selectedDisplayID == display.id,
+                    isDisabled: isPreparing
+                ) {
+                    recorder.selectedDisplayID = display.id
+                }
+            }
+        }
+    }
+
+    private var windowGrid: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if recorder.availableWindows.isEmpty {
+                Text("No windows found. Make sure the window you want to record is visible on screen.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 140, maximum: 200), spacing: 12)],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(recorder.availableWindows) { window in
+                        SelectionCard(
+                            title: window.appName,
+                            subtitle: window.title,
+                            isSelected: recorder.selectedWindowID == window.id,
+                            isDisabled: isPreparing
+                        ) {
+                            recorder.selectedWindowID = window.id
+                        }
                     }
                 }
             }
+        }
+        .onAppear {
+            recorder.discoverWindows()
         }
     }
 }
@@ -236,14 +295,7 @@ private struct VideoQualityOptionsView: View {
     }
 
     private var resolutionHint: String {
-        guard let display = recorder.availableDisplays.first(where: { $0.id == recorder.selectedDisplayID })
-                ?? recorder.availableDisplays.first else {
-            return "Scaled to fit the selected display. Never upscaled past native."
-        }
-        let native = CGSize(
-            width: CGDisplayPixelsWide(display.id),
-            height: CGDisplayPixelsHigh(display.id)
-        )
+        let native = nativeSize
         let out = recorder.selectedResolution.outputSize(forNative: native)
         let isClamped = recorder.selectedResolution != .native
             && abs(out.width - native.width) < 1
@@ -251,13 +303,32 @@ private struct VideoQualityOptionsView: View {
             && recorder.selectedResolution.maxSize != nil
         if isClamped {
             return String(
-                format: "Display is %.0f×%.0f — this preset can’t go higher, so capture stays at native.",
+                format: "Source is %.0f×%.0f — this preset can’t go higher, so capture stays at native.",
                 native.width, native.height
             )
         }
         return String(
-            format: "Will capture ≈ %.0f×%.0f (display %.0f×%.0f).",
+            format: "Will capture ≈ %.0f×%.0f (source %.0f×%.0f).",
             out.width, out.height, native.width, native.height
+        )
+    }
+
+    private var nativeSize: CGSize {
+        if recorder.captureMode == .window {
+            guard let window = recorder.availableWindows.first(where: { $0.id == recorder.selectedWindowID })
+                    ?? recorder.availableWindows.first else {
+                return CGSize(width: 1920, height: 1080)
+            }
+            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+            return CGSize(width: window.frame.width * scale, height: window.frame.height * scale)
+        }
+        guard let display = recorder.availableDisplays.first(where: { $0.id == recorder.selectedDisplayID })
+                ?? recorder.availableDisplays.first else {
+            return CGSize(width: 1920, height: 1080)
+        }
+        return CGSize(
+            width: CGDisplayPixelsWide(display.id),
+            height: CGDisplayPixelsHigh(display.id)
         )
     }
 }
