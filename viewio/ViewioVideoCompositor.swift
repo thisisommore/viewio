@@ -31,6 +31,8 @@ final class ViewioCompositionInstruction: NSObject, AVVideoCompositionInstructio
     let cameraTrackID: CMPersistentTrackID?
     /// AVFoundation transform (top-left origin) that places the camera frame.
     let cameraTransform: CGAffineTransform?
+    /// Local file URL of a static image to draw behind the source video.
+    let backgroundImageURL: URL?
 
     init(
         timeRange: CMTimeRange,
@@ -39,7 +41,8 @@ final class ViewioCompositionInstruction: NSObject, AVVideoCompositionInstructio
         keyframes: [ZoomTransformSample],
         motionBlurAmount: Double,
         cameraTrackID: CMPersistentTrackID? = nil,
-        cameraTransform: CGAffineTransform? = nil
+        cameraTransform: CGAffineTransform? = nil,
+        backgroundImageURL: URL? = nil
     ) {
         self.timeRange = timeRange
         self.sourceTrackID = sourceTrackID
@@ -48,6 +51,7 @@ final class ViewioCompositionInstruction: NSObject, AVVideoCompositionInstructio
         self.motionBlurAmount = min(1, max(0, motionBlurAmount))
         self.cameraTrackID = cameraTrackID
         self.cameraTransform = cameraTransform
+        self.backgroundImageURL = backgroundImageURL
         var required: [NSValue] = [NSNumber(value: sourceTrackID)]
         if let cameraTrackID {
             required.append(NSNumber(value: cameraTrackID))
@@ -165,10 +169,29 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
             let ciTransform = avTransformToCI(sample.transform, height: render.height)
             image = image.transformed(by: ciTransform)
 
-            // Fill letterbox and crop to the output frame.
-            let canvas = CIImage(color: .black).cropped(
-                to: CGRect(origin: .zero, size: render)
-            )
+            // Fill the output frame with the selected wallpaper, or black.
+            let canvas: CIImage
+            if let backgroundURL = instruction.backgroundImageURL,
+               let wallpaperImage = CIImage(contentsOf: backgroundURL) {
+                let scaleX = render.width / wallpaperImage.extent.width
+                let scaleY = render.height / wallpaperImage.extent.height
+                let scale = max(scaleX, scaleY)
+                let centered = CGAffineTransform(
+                    a: scale,
+                    b: 0,
+                    c: 0,
+                    d: scale,
+                    tx: (render.width - wallpaperImage.extent.width * scale) / 2,
+                    ty: (render.height - wallpaperImage.extent.height * scale) / 2
+                )
+                canvas = wallpaperImage
+                    .transformed(by: centered)
+                    .cropped(to: CGRect(origin: .zero, size: render))
+            } else {
+                canvas = CIImage(color: .black).cropped(
+                    to: CGRect(origin: .zero, size: render)
+                )
+            }
             image = image.composited(over: canvas).cropped(
                 to: CGRect(origin: .zero, size: render)
             )

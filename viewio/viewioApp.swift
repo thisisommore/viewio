@@ -10,11 +10,13 @@ import SwiftUI
 @main
 struct viewioApp: App {
     @StateObject private var recorder = RecordingController()
+    @StateObject private var wallpaperManager = WallpaperManager.shared
 
     var body: some Scene {
         WindowGroup("viewio") {
             ContentView()
                 .environmentObject(recorder)
+                .environmentObject(wallpaperManager)
         }
 
         MenuBarExtra(

@@ -110,6 +110,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
     case edit
     case cursor
     case camera
+    case background
 
     var id: String { rawValue }
 
@@ -118,6 +119,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
         case .edit: "Edit"
         case .cursor: "Cursor"
         case .camera: "Camera"
+        case .background: "Background"
         }
     }
 }
@@ -170,6 +172,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var hasCursorData = false
     @Published private(set) var cameraSettings: CameraSettings = .default
     @Published private(set) var hasCameraVideo = false
+    @Published var isBackgroundEnabled: Bool
     /// Pixel size of the composed video frame (for letterboxed cursor overlay).
     @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
 
@@ -197,10 +200,22 @@ final class EditorModel: ObservableObject {
     private var exportSession: AVAssetExportSession?
     private var exportProgressTimer: Timer?
     private var isSeeking = false
+    private let wallpaperManager = WallpaperManager.shared
+    private var wallpaperCancellable: AnyCancellable?
 
-    init(sourceURL: URL) {
+    init(sourceURL: URL, captureMode: CaptureMode = .display) {
         self.sourceURL = sourceURL
+        self.isBackgroundEnabled = (captureMode == .window)
         installTimeObserver()
+        wallpaperManager.loadWallpapersIfNeeded()
+        wallpaperCancellable = wallpaperManager.$selectedWallpaperID
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.rebuildPreview(preservingPlayhead: true)
+                }
+            }
         Task {
             await loadSource()
         }
@@ -372,6 +387,12 @@ final class EditorModel: ObservableObject {
         settings.isEnabled = enabled
         cameraSettings = settings
         saveCameraSettings()
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setBackgroundEnabled(_ enabled: Bool) {
+        guard isBackgroundEnabled != enabled else { return }
+        isBackgroundEnabled = enabled
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -875,7 +896,26 @@ final class EditorModel: ObservableObject {
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
 
-        let baseTransform = preferred
+        let selectedWallpaperURL = wallpaperManager.selectedWallpaperID
+            .flatMap { wallpaperManager.wallpaper(withID: $0) }
+            .flatMap { FileManager.default.fileExists(atPath: $0.localURL.path) ? $0.localURL : nil }
+        let includeWallpaper = isBackgroundEnabled && selectedWallpaperURL != nil
+
+        // When a wallpaper is active, shrink the video slightly and center it so
+        // the background image shows around the edges.
+        let baseTransform: CGAffineTransform
+        if includeWallpaper {
+            let placementScale: CGFloat = 0.95
+            let orientedWidth = abs(transformedSize.width)
+            let orientedHeight = abs(transformedSize.height)
+            let offsetX = (renderSize.width - orientedWidth * placementScale) / 2
+            let offsetY = (renderSize.height - orientedHeight * placementScale) / 2
+            let placement = CGAffineTransform(scaleX: placementScale, y: placementScale)
+                .translatedBy(x: offsetX / placementScale, y: offsetY / placementScale)
+            baseTransform = preferred.concatenating(placement)
+        } else {
+            baseTransform = preferred
+        }
         compositionBaseTransform = baseTransform
         // One keyframe timeline shared by video + cursor overlay (critical for lock-on).
         let samples = buildZoomTransformSamples(
@@ -914,10 +954,10 @@ final class EditorModel: ObservableObject {
             print("[Camera] custom compositor transform renderSize=\(renderSize), orientedSize=\(orientedSize), ciFrame=\(ciFrame), transform=\(String(describing: cameraTransform))")
         }
 
-        if includeCamera || zoomBlur > 0.001 {
-            // Use the Core-Image compositor so we can scale the camera overlay
-            // ourselves. The hardware layer-instruction path rejects the scaled
-            // HEVC camera track on macOS.
+        if includeCamera || zoomBlur > 0.001 || includeWallpaper {
+            // Use the Core-Image compositor so we can draw the wallpaper background
+            // and scale the camera overlay ourselves. The hardware layer-instruction
+            // path cannot composite a static image background.
             let instruction = ViewioCompositionInstruction(
                 timeRange: CMTimeRange(start: .zero, duration: duration),
                 sourceTrackID: compositionTrack.trackID,
@@ -925,7 +965,8 @@ final class EditorModel: ObservableObject {
                 keyframes: samples,
                 motionBlurAmount: includeCamera ? 0 : zoomBlur,
                 cameraTrackID: includeCamera ? cameraTrack?.trackID : nil,
-                cameraTransform: cameraTransform
+                cameraTransform: cameraTransform,
+                backgroundImageURL: selectedWallpaperURL
             )
             videoComposition.instructions = [instruction]
             videoComposition.customVideoCompositorClass = ViewioVideoCompositor.self

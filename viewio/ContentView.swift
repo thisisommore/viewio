@@ -45,7 +45,7 @@ struct ContentView: View {
                 )
 
             case let .finished(url):
-                EditorWorkspace(sourceURL: url)
+                EditorWorkspace(sourceURL: url, captureMode: recorder.captureMode)
                     .id(url)
 
             case let .failed(message):
@@ -530,8 +530,8 @@ private struct RecordingProgressView: View {
 private struct EditorWorkspace: View {
     @StateObject private var model: EditorModel
 
-    init(sourceURL: URL) {
-        _model = StateObject(wrappedValue: EditorModel(sourceURL: sourceURL))
+    init(sourceURL: URL, captureMode: CaptureMode = .display) {
+        _model = StateObject(wrappedValue: EditorModel(sourceURL: sourceURL, captureMode: captureMode))
     }
 
     var body: some View {
@@ -886,6 +886,8 @@ private struct ClipInspector: View {
                         CursorInspectorPanel(model: model)
                     case .camera:
                         CameraInspectorPanel(model: model)
+                    case .background:
+                        BackgroundInspectorPanel(model: model)
                     }
                 }
                 .padding(16)
@@ -1721,6 +1723,122 @@ private struct CameraInspectorPanel: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct BackgroundInspectorPanel: View {
+    @ObservedObject var model: EditorModel
+    @EnvironmentObject private var wallpaperManager: WallpaperManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("BACKGROUND")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.75)
+                        .foregroundStyle(.secondary)
+                    Text("Wallpaper behind recording")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                Spacer()
+                Toggle(
+                    "On",
+                    isOn: Binding(
+                        get: { model.isBackgroundEnabled },
+                        set: model.setBackgroundEnabled
+                    )
+                )
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+            }
+
+            if !model.isBackgroundEnabled {
+                Text("Background is off. Turn it on to apply a wallpaper behind the recording.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if wallpaperManager.isLoading {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading wallpapers…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let error = wallpaperManager.lastError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if wallpaperManager.wallpapers.isEmpty {
+                Text("No wallpapers available.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Tap a wallpaper to apply it behind the recording.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ScrollView {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 72), spacing: 8)],
+                        spacing: 8
+                    ) {
+                        ForEach(wallpaperManager.wallpapers) { wallpaper in
+                            WallpaperCard(
+                                wallpaper: wallpaper,
+                                isSelected: wallpaperManager.selectedWallpaperID == wallpaper.id
+                            ) {
+                                wallpaperManager.selectWallpaper(wallpaper)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 360)
+            }
+        }
+    }
+}
+
+private struct WallpaperCard: View {
+    let wallpaper: WallpaperManager.Wallpaper
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.primary.opacity(0.06))
+
+                    if let image = NSImage(contentsOf: wallpaper.localURL) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                .frame(height: 54)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(isSelected ? Color.accentColor : Color.primary.opacity(0.12), lineWidth: isSelected ? 2 : 1)
+                }
+
+                Text(wallpaper.name)
+                    .font(.system(size: 9, weight: .medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(height: 24)
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 
