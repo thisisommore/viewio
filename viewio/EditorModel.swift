@@ -724,6 +724,78 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    /// Estimates the window corner radius by scanning diagonally from each corner
+    /// of the first video frame for the transition from black to non-black pixels.
+    private func detectWindowCornerRadius(asset: AVURLAsset) async -> Double? {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+
+        guard let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) else {
+            return nil
+        }
+
+        let width = cgImage.width
+        let height = cgImage.height
+        let bytesPerPixel = 4
+        let bytesPerRow = bytesPerPixel * width
+        var pixelData = [UInt8](repeating: 0, count: height * bytesPerRow)
+
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: &pixelData,
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: bytesPerRow,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return nil
+        }
+
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let corners: [(start: (Int, Int), step: (Int, Int))] = [
+            ((0, 0), (1, 1)),
+            ((width - 1, 0), (-1, 1)),
+            ((0, height - 1), (1, -1)),
+            ((width - 1, height - 1), (-1, -1))
+        ]
+
+        var radii: [Double] = []
+        let threshold: UInt8 = 30
+        let maxDistance = min(200, min(width, height) / 2)
+
+        for (start, step) in corners {
+            var x = start.0
+            var y = start.1
+            var distance = 0
+            while distance < maxDistance {
+                let offset = y * bytesPerRow + x * bytesPerPixel
+                let r = pixelData[offset]
+                let g = pixelData[offset + 1]
+                let b = pixelData[offset + 2]
+                let brightness = max(r, max(g, b))
+                if brightness > threshold {
+                    break
+                }
+                x += step.0
+                y += step.1
+                distance += 1
+            }
+            // Along a diagonal, the black quarter-circle extends to ~0.293 * radius.
+            if distance > 2, distance < maxDistance {
+                radii.append(Double(distance) / 0.293)
+            }
+        }
+
+        guard !radii.isEmpty else { return nil }
+        radii.sort()
+        return radii[radii.count / 2]
+    }
+
     private func loadSource() async {
         let asset = AVURLAsset(url: sourceURL)
 
@@ -755,6 +827,12 @@ final class EditorModel: ObservableObject {
 
             (cameraAsset, cameraVideoTrack, cameraDuration, cameraNaturalSize, cameraPreferredTransform, cameraSettings) = await loadCameraTrack()
             hasCameraVideo = cameraVideoTrack != nil
+
+            // Detect the window corner radius from black pixels at the corners.
+            if captureMode == .window,
+               let detectedRadius = await detectWindowCornerRadius(asset: asset) {
+                backgroundCornerRadius = detectedRadius
+            }
 
             clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
             selectedClipID = clips.first?.id
