@@ -22,6 +22,7 @@ struct ContentView: View {
 
             case .preparing:
                 RecordingProgressView(
+                    recorder: recorder,
                     elapsed: recorder.elapsed,
                     isStopping: false,
                     onStop: recorder.stopRecording
@@ -29,6 +30,7 @@ struct ContentView: View {
 
             case .recording:
                 RecordingProgressView(
+                    recorder: recorder,
                     elapsed: recorder.elapsed,
                     isStopping: false,
                     onStop: recorder.stopRecording
@@ -36,6 +38,7 @@ struct ContentView: View {
 
             case .stopping:
                 RecordingProgressView(
+                    recorder: recorder,
                     elapsed: recorder.elapsed,
                     isStopping: true,
                     onStop: {}
@@ -90,6 +93,8 @@ private struct RecordingStartView: View {
                     VideoQualityOptionsView(recorder: recorder, isPreparing: isPreparing)
 
                     AudioOptionsView(recorder: recorder, isPreparing: isPreparing)
+
+                    CameraOptionsView(recorder: recorder, isPreparing: isPreparing)
                 }
                 .padding(32)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -303,6 +308,58 @@ private struct AudioOptionsView: View {
     }
 }
 
+private struct CameraOptionsView: View {
+    @ObservedObject var recorder: RecordingController
+    let isPreparing: Bool
+    @State private var isRequestingAuthorization = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("Camera")
+
+            HStack(alignment: .top, spacing: 12) {
+                SelectionCard(
+                    title: "Off",
+                    isSelected: !recorder.captureCamera,
+                    isDisabled: isPreparing || isRequestingAuthorization
+                ) {
+                    recorder.captureCamera = false
+                }
+                .frame(width: 116)
+
+                ForEach(recorder.availableCameras) { device in
+                    let isSelected = recorder.captureCamera && recorder.selectedCameraID == device.id
+                    SelectionCard(
+                        title: device.name,
+                        isSelected: isSelected,
+                        isDisabled: isPreparing || isRequestingAuthorization
+                    ) {
+                        Task {
+                            if !isSelected {
+                                isRequestingAuthorization = true
+                                let granted = await recorder.requestCameraAuthorizationIfNeeded()
+                                isRequestingAuthorization = false
+                                if granted {
+                                    recorder.selectedCameraID = device.id
+                                    recorder.captureCamera = true
+                                }
+                            }
+                        }
+                    }
+                    .frame(width: 116)
+                }
+            }
+
+            if recorder.captureCamera {
+                Text("A picture-in-picture camera overlay will be recorded separately so you can move it after recording.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 private struct SelectionCard: View {
     let title: String
     var subtitle: String? = nil
@@ -357,6 +414,7 @@ private func sectionTitle(_ title: String) -> some View {
 }
 
 private struct RecordingProgressView: View {
+    @ObservedObject var recorder: RecordingController
     let elapsed: TimeInterval
     let isStopping: Bool
     let onStop: () -> Void
@@ -377,6 +435,12 @@ private struct RecordingProgressView: View {
                     Text(isStopping ? "Saving your video" : formattedDuration(elapsed))
                         .font(.system(size: 15, design: .monospaced))
                         .foregroundStyle(.secondary)
+
+                    if recorder.captureCamera {
+                        Text("Camera overlay is shown on the selected display")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -749,6 +813,8 @@ private struct ClipInspector: View {
                         editTab
                     case .cursor:
                         CursorInspectorPanel(model: model)
+                    case .camera:
+                        CameraInspectorPanel(model: model)
                     }
                 }
                 .padding(16)
@@ -1490,6 +1556,136 @@ private struct CursorInspectorPanel: View {
             .tracking(0.7)
             .foregroundStyle(.secondary)
             .padding(.top, 4)
+    }
+}
+
+// MARK: - Camera inspector
+
+private struct CameraInspectorPanel: View {
+    @ObservedObject var model: EditorModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("CAMERA")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.75)
+                        .foregroundStyle(.secondary)
+                    Text("Overlay position")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                Spacer()
+                Toggle(
+                    "On",
+                    isOn: Binding(
+                        get: { model.cameraSettings.isEnabled },
+                        set: model.setCameraEnabled
+                    )
+                )
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+                .disabled(!model.hasCameraVideo)
+                .help(model.hasCameraVideo ? "Show camera overlay" : "No camera video for this recording")
+            }
+
+            if !model.hasCameraVideo {
+                missingCameraBanner
+            } else {
+                Text("Camera was recorded separately. Choose one corner for the entire video.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                LazyVGrid(
+                    columns: [GridItem(.flexible()), GridItem(.flexible())],
+                    spacing: 8
+                ) {
+                    ForEach(CameraCorner.allCases) { corner in
+                        CornerButton(
+                            corner: corner,
+                            isSelected: model.cameraSettings.corner == corner,
+                            isEnabled: model.cameraSettings.isEnabled
+                        ) {
+                            model.setCameraCorner(corner)
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Size")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(String(format: "%.0f%%", model.cameraSettings.clampedSize * 100))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { model.cameraSettings.clampedSize },
+                            set: model.setCameraSize
+                        ),
+                        in: 0.08...0.45,
+                        step: 0.02
+                    )
+                    .disabled(!model.cameraSettings.isEnabled)
+                }
+            }
+        }
+        .opacity(model.hasCameraVideo && !model.cameraSettings.isEnabled ? 0.85 : 1)
+    }
+
+    private var missingCameraBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("No camera video", systemImage: "video.slash")
+                .font(.system(size: 13, weight: .semibold))
+            Text("Enable Camera before starting a recording to capture a picture-in-picture overlay.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct CornerButton: View {
+    let corner: CameraCorner
+    let isSelected: Bool
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: corner.systemImage)
+                    .imageScale(.large)
+                Text(corner.title)
+                    .font(.system(size: 12, weight: .medium))
+                Spacer(minLength: 0)
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                        .imageScale(.small)
+                }
+            }
+            .padding(8)
+            .background {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.04))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.8) : Color.primary.opacity(0.06), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.45)
     }
 }
 

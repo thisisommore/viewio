@@ -109,6 +109,7 @@ struct TimelineClipLayout: Identifiable {
 enum InspectorTab: String, CaseIterable, Identifiable {
     case edit
     case cursor
+    case camera
 
     var id: String { rawValue }
 
@@ -116,6 +117,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
         switch self {
         case .edit: "Edit"
         case .cursor: "Cursor"
+        case .camera: "Camera"
         }
     }
 }
@@ -166,6 +168,8 @@ final class EditorModel: ObservableObject {
     @Published private(set) var cursorSettings: CursorSettings = .default
     @Published private(set) var motionBlurSettings: MotionBlurSettings = .default
     @Published private(set) var hasCursorData = false
+    @Published private(set) var cameraSettings: CameraSettings = .default
+    @Published private(set) var hasCameraVideo = false
     /// Pixel size of the composed video frame (for letterboxed cursor overlay).
     @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
 
@@ -184,6 +188,11 @@ final class EditorModel: ObservableObject {
     private var sourceAsset: AVURLAsset?
     private var sourceVideoTrack: AVAssetTrack?
     private var sourceAudioTracks: [AVAssetTrack] = []
+    private var cameraAsset: AVURLAsset?
+    private var cameraVideoTrack: AVAssetTrack?
+    private var cameraDuration: Double = 0
+    private var cameraNaturalSize: CGSize = .zero
+    private var cameraPreferredTransform: CGAffineTransform = .identity
     private var timeObserver: Any?
     private var exportSession: AVAssetExportSession?
     private var exportProgressTimer: Timer?
@@ -355,6 +364,34 @@ final class EditorModel: ObservableObject {
         settings.isEnabled = enabled
         cursorSettings = settings
         // Preview uses a UI overlay; export bakes the cursor offline.
+    }
+
+    func setCameraEnabled(_ enabled: Bool) {
+        guard hasCameraVideo, cameraSettings.isEnabled != enabled else { return }
+        var settings = cameraSettings
+        settings.isEnabled = enabled
+        cameraSettings = settings
+        saveCameraSettings()
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setCameraCorner(_ corner: CameraCorner) {
+        guard cameraSettings.corner != corner else { return }
+        var settings = cameraSettings
+        settings.corner = corner
+        cameraSettings = settings
+        saveCameraSettings()
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setCameraSize(_ size: Double) {
+        let clamped = min(0.45, max(0.08, size))
+        guard abs(cameraSettings.size - clamped) > 0.001 else { return }
+        var settings = cameraSettings
+        settings.size = clamped
+        cameraSettings = settings
+        saveCameraSettings()
+        rebuildPreview(preservingPlayhead: true)
     }
 
     func setCursorStyle(_ style: CursorStyle) {
@@ -564,6 +601,50 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    private func loadCameraTrack() async -> (AVURLAsset?, AVAssetTrack?, Double, CGSize, CGAffineTransform, CameraSettings) {
+        let cameraURL = sourceURL.deletingPathExtension().appendingPathExtension("camera.mp4")
+        let settingsURL = sourceURL.deletingPathExtension().appendingPathExtension("cameracorner.json")
+        print("[Camera] sidecar path: \(cameraURL.path), exists: \(FileManager.default.fileExists(atPath: cameraURL.path))")
+        guard FileManager.default.fileExists(atPath: cameraURL.path) else {
+            return (nil, nil, 0, .zero, .identity, .default)
+        }
+
+        let asset = AVURLAsset(url: cameraURL)
+        do {
+            let tracks = try await asset.loadTracks(withMediaType: .video)
+            guard let track = tracks.first else {
+                print("[Camera] no video track in sidecar")
+                return (nil, nil, 0, .zero, .identity, .default)
+            }
+            let duration = try await asset.load(.duration).seconds
+            let naturalSize = try await track.load(.naturalSize)
+            let preferredTransform = try await track.load(.preferredTransform)
+            let settings: CameraSettings
+            if FileManager.default.fileExists(atPath: settingsURL.path),
+               let data = try? Data(contentsOf: settingsURL),
+               let decoded = try? JSONDecoder().decode(CameraSettings.self, from: data) {
+                settings = decoded
+            } else {
+                settings = CameraSettings(isEnabled: true, corner: .bottomRight, size: CameraOverlayGeometry.defaultSize)
+            }
+            print("[Camera] loaded size=\(naturalSize), transform=\(preferredTransform), duration=\(duration), enabled=\(settings.isEnabled)")
+            return (asset, track, duration, naturalSize, preferredTransform, settings)
+        } catch {
+            print("[Camera] failed to load camera track: \(error)")
+            return (nil, nil, 0, .zero, .identity, .default)
+        }
+    }
+
+    private func saveCameraSettings() {
+        let settingsURL = sourceURL.deletingPathExtension().appendingPathExtension("cameracorner.json")
+        do {
+            let data = try JSONEncoder().encode(cameraSettings)
+            try data.write(to: settingsURL)
+        } catch {
+            print("Failed to save camera settings: \(error)")
+        }
+    }
+
     private func loadCursorTrack() -> [CursorPosition] {
         let trackURL = sourceURL.deletingPathExtension().appendingPathExtension("cursor.json")
         guard FileManager.default.fileExists(atPath: trackURL.path) else { return [] }
@@ -630,6 +711,10 @@ final class EditorModel: ObservableObject {
             var settings = cursorSettings
             settings.isEnabled = hasCursorData
             cursorSettings = settings
+
+            (cameraAsset, cameraVideoTrack, cameraDuration, cameraNaturalSize, cameraPreferredTransform, cameraSettings) = await loadCameraTrack()
+            hasCameraVideo = cameraVideoTrack != nil
+
             clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
             selectedClipID = clips.first?.id
             duration = seconds
@@ -689,6 +774,12 @@ final class EditorModel: ObservableObject {
             composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
         }
 
+        let includeCamera = cameraSettings.isEnabled && cameraVideoTrack != nil
+        let compositionCameraTrack: AVMutableCompositionTrack? = includeCamera
+            ? composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+            : nil
+        compositionCameraTrack?.preferredTransform = .identity
+
         var cursor = CMTime.zero
         for clip in clips {
             let sourceDuration = CMTime(seconds: clip.sourceDuration, preferredTimescale: 600)
@@ -706,6 +797,28 @@ final class EditorModel: ObservableObject {
                 continue
             }
 
+            // Camera sidecar may be slightly shorter than the screen recording.
+            // Insert only the overlapping range so the overlay still appears.
+            var cameraInsertedDuration: CMTime?
+            if let cameraVideoTrack, let compositionCameraTrack {
+                let cameraMaxStart = CMTime(seconds: cameraDuration, preferredTimescale: 600)
+                if sourceRange.start < cameraMaxStart {
+                    let available = cameraMaxStart - sourceRange.start
+                    let cameraRange = CMTimeRange(start: sourceRange.start, duration: min(sourceRange.duration, available))
+                    if cameraRange.duration > .zero {
+                        do {
+                            try compositionCameraTrack.insertTimeRange(cameraRange, of: cameraVideoTrack, at: cursor)
+                            cameraInsertedDuration = cameraRange.duration
+                            print("[Camera] inserted range \(cameraRange.start.seconds)...\(cameraRange.end.seconds) at composition cursor \(cursor.seconds)")
+                        } catch {
+                            print("[Camera] insert failed: \(error)")
+                        }
+                    } else {
+                        print("[Camera] no overlapping range (camera duration \(cameraDuration) < source start \(sourceRange.start.seconds))")
+                    }
+                }
+            }
+
             let outputDuration = CMTime(seconds: clip.outputDuration, preferredTimescale: 600)
             if clip.speed != 1 {
                 let insertedRange = CMTimeRange(start: cursor, duration: sourceDuration)
@@ -713,14 +826,21 @@ final class EditorModel: ObservableObject {
                 for compositionAudioTrack in compositionAudioTracks {
                     compositionAudioTrack.scaleTimeRange(insertedRange, toDuration: outputDuration)
                 }
+                if let compositionCameraTrack, let cameraInsertedDuration, cameraInsertedDuration > .zero {
+                    let cameraTargetDuration = CMTime(seconds: cameraInsertedDuration.seconds / clip.speed, preferredTimescale: 600)
+                    let cameraInsertedRange = CMTimeRange(start: cursor, duration: cameraInsertedDuration)
+                    compositionCameraTrack.scaleTimeRange(cameraInsertedRange, toDuration: cameraTargetDuration)
+                }
             }
 
             cursor = cursor + outputDuration
         }
 
 
+        print("CamDebug composition tracks: screen segments=\(compositionVideoTrack.segments.count), camera segments=\(compositionCameraTrack?.segments.count ?? 0)")
         let videoComposition = makeVideoComposition(
             compositionTrack: compositionVideoTrack,
+            cameraTrack: compositionCameraTrack,
             sourceTrack: sourceVideoTrack,
             duration: cursor,
             includeCursorOverlay: includeCursorOverlay
@@ -734,7 +854,8 @@ final class EditorModel: ObservableObject {
     }
 
     private func makeVideoComposition(
-        compositionTrack: AVCompositionTrack,
+        compositionTrack: AVMutableCompositionTrack,
+        cameraTrack: AVMutableCompositionTrack?,
         sourceTrack: AVAssetTrack,
         duration: CMTime,
         includeCursorOverlay: Bool
@@ -765,21 +886,54 @@ final class EditorModel: ObservableObject {
         zoomTransformSamples = samples
 
         let zoomBlur = motionBlurSettings.zoomStrength
+        let includeCamera = cameraTrack != nil && cameraSettings.isEnabled
+        print("CamDebug makeVideoComposition renderSize=\(renderSize), frameDuration=\(videoComposition.frameDuration), includeCamera=\(includeCamera), cameraSettings.enabled=\(cameraSettings.isEnabled)")
+        print("CamDebug source formatDescriptions=\(sourceTrack.formatDescriptions)")
+        print("CamDebug camera formatDescriptions=\(cameraVideoTrack?.formatDescriptions ?? [])")
 
-        if zoomBlur > 0.001 {
-            // Custom compositor applies zoom + directional motion blur (preview + export).
+        var cameraTransform: CGAffineTransform?
+        if includeCamera {
+            let cameraBaseTransform = cameraPreferredTransform
+            // Use the oriented pixel size (after applying the track's preferred
+            // transform) so flips/rotations don't push the overlay out of frame.
+            let orientedSize = CGSize(
+                width: abs(cameraNaturalSize.applying(cameraBaseTransform).width),
+                height: abs(cameraNaturalSize.applying(cameraBaseTransform).height)
+            )
+            // Core Image uses a bottom-left origin, so place the camera using a
+            // bottom-left target frame and apply the transform directly.
+            let ciFrame = CameraOverlayGeometry.cameraFrameInCI(
+                in: renderSize,
+                sizeFraction: cameraSettings.clampedSize,
+                corner: cameraSettings.corner
+            )
+            cameraTransform = CameraOverlayGeometry.cameraTransform(
+                cameraNaturalSize: orientedSize,
+                targetFrame: ciFrame
+            )
+            print("[Camera] custom compositor transform renderSize=\(renderSize), orientedSize=\(orientedSize), ciFrame=\(ciFrame), transform=\(String(describing: cameraTransform))")
+        }
+
+        if includeCamera || zoomBlur > 0.001 {
+            // Use the Core-Image compositor so we can scale the camera overlay
+            // ourselves. The hardware layer-instruction path rejects the scaled
+            // HEVC camera track on macOS.
             let instruction = ViewioCompositionInstruction(
                 timeRange: CMTimeRange(start: .zero, duration: duration),
                 sourceTrackID: compositionTrack.trackID,
                 renderSize: renderSize,
                 keyframes: samples,
-                motionBlurAmount: zoomBlur
+                motionBlurAmount: includeCamera ? 0 : zoomBlur,
+                cameraTrackID: includeCamera ? cameraTrack?.trackID : nil,
+                cameraTransform: cameraTransform
             )
             videoComposition.instructions = [instruction]
             videoComposition.customVideoCompositorClass = ViewioVideoCompositor.self
         } else {
             let instruction = AVMutableVideoCompositionInstruction()
             instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+
+            var layerInstructions: [AVVideoCompositionLayerInstruction] = []
 
             let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
             if zoomRanges.isEmpty {
@@ -792,7 +946,9 @@ final class EditorModel: ObservableObject {
                     compositionDuration: duration
                 )
             }
-            instruction.layerInstructions = [layerInstruction]
+            layerInstructions.append(layerInstruction)
+
+            instruction.layerInstructions = layerInstructions
             videoComposition.instructions = [instruction]
         }
 

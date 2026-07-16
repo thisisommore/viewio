@@ -15,6 +15,12 @@ struct AudioDevice: Identifiable, Equatable {
     let isDefault: Bool
 }
 
+struct CameraDevice: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let isDefault: Bool
+}
+
 struct DisplayInfo: Identifiable, Equatable {
     let id: CGDirectDisplayID
     let name: String
@@ -156,16 +162,24 @@ final class RecordingController: NSObject, ObservableObject {
     @Published private(set) var elapsed: TimeInterval = 0
     @Published var captureSystemAudio = true
     @Published var captureMicrophone = false
+    @Published var captureCamera = false
+    @Published var selectedCameraID: String?
+    @Published private(set) var availableCameras: [CameraDevice] = []
     @Published var selectedMicrophoneID: String?
     @Published private(set) var availableMicrophones: [AudioDevice] = []
     @Published var selectedDisplayID: CGDirectDisplayID?
     @Published private(set) var availableDisplays: [DisplayInfo] = []
     @Published var selectedResolution: RecordingResolution = .native
     @Published var selectedFrameRate: RecordingFrameRate = .fps60
+    @Published var cameraCorner: CameraCorner = .bottomRight
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
     private var outputURL: URL?
+    private(set) var cameraRecorder: CameraRecorder?
+    private var cameraOutputURL: URL?
+    private var cameraCornerURL: URL?
+    private var overlayWindow: CameraOverlayWindowController?
     private var startedAt: Date?
     private var timer: Timer?
     private var cursorTimer: Timer?
@@ -191,6 +205,7 @@ final class RecordingController: NSObject, ObservableObject {
     override init() {
         super.init()
         discoverDisplays()
+        discoverCameras()
         discoverMicrophones()
     }
 
@@ -206,6 +221,12 @@ final class RecordingController: NSObject, ObservableObject {
                     let authorized = await requestMicrophoneAuthorization()
                     guard authorized else {
                         throw RecordingError.microphoneDenied
+                    }
+                }
+                if captureCamera {
+                    let authorized = await CameraRecorder.requestAccess()
+                    guard authorized else {
+                        throw RecordingError.cameraDenied
                     }
                 }
                 try await configureAndStartCapture()
@@ -238,6 +259,8 @@ final class RecordingController: NSObject, ObservableObject {
     func discardRecording() {
         if case let .finished(url) = state {
             try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: cameraSidecarURL(for: url))
+            try? FileManager.default.removeItem(at: cameraCornerSidecarURL(for: url))
         }
         resetCaptureReferences()
         state = .idle
@@ -262,7 +285,52 @@ final class RecordingController: NSObject, ObservableObject {
         captureBounds = displayBoundsInCocoaSpace(displayID: display.displayID)
 
         let outputURL = try makeOutputURL()
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let cameraOutputURL = captureCamera ? cameraSidecarURL(for: outputURL) : nil
+        let cameraCornerURL = captureCamera ? cameraCornerSidecarURL(for: outputURL) : nil
+        self.outputURL = outputURL
+        self.cameraOutputURL = cameraOutputURL
+        self.cameraCornerURL = cameraCornerURL
+
+        // Pick the screen codec early (camera sidecar uses AVCapture defaults).
+        let recordingConfiguration = SCRecordingOutputConfiguration()
+        recordingConfiguration.outputURL = outputURL
+        recordingConfiguration.outputFileType = .mp4
+        let hevc = AVVideoCodecType.hevc
+        if recordingConfiguration.availableVideoCodecTypes.contains(hevc) {
+            recordingConfiguration.videoCodecType = hevc
+        } else {
+            recordingConfiguration.videoCodecType = .h264
+        }
+
+        // Start the camera session early so its preview layer is ready, and
+        // create the on-screen floating overlay before capturing content so we
+        // can exclude that window from the screen recording.
+        if captureCamera {
+            let cameraRecorder = CameraRecorder(selectedDeviceID: selectedCameraID)
+            self.cameraRecorder = cameraRecorder
+            let overlay = CameraOverlayWindowController(
+                recorder: cameraRecorder,
+                displayID: display.displayID,
+                corner: cameraCorner
+            ) { [weak self] corner in
+                self?.cameraCorner = corner
+            }
+            self.overlayWindow = overlay
+            overlay.show()
+        }
+
+        // Re-fetch shareable content now that the overlay window is on screen
+        // so ScreenCaptureKit can see it and exclude it from the recording.
+        let captureContent = try await SCShareableContent.current
+        let excludedWindows: [SCWindow]
+        if let overlayWindow,
+           let windowNumber = overlayWindow.windowNumber,
+           let overlaySCWindow = captureContent.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
+            excludedWindows = [overlaySCWindow]
+        } else {
+            excludedWindows = []
+        }
+        let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
         let configuration = SCStreamConfiguration()
 
         // Prefer filter metrics (points × pixel scale) so Retina displays capture
@@ -301,17 +369,6 @@ final class RecordingController: NSObject, ObservableObject {
         configuration.captureMicrophone = captureMicrophone
         configuration.microphoneCaptureDeviceID = selectedMicrophoneID
 
-        let recordingConfiguration = SCRecordingOutputConfiguration()
-        recordingConfiguration.outputURL = outputURL
-        recordingConfiguration.outputFileType = .mp4
-        // HEVC is much sharper than H.264 at ScreenCaptureKit's default bitrates.
-        let hevc = AVVideoCodecType.hevc
-        if recordingConfiguration.availableVideoCodecTypes.contains(hevc) {
-            recordingConfiguration.videoCodecType = hevc
-        } else {
-            recordingConfiguration.videoCodecType = .h264
-        }
-
         let recordingOutput = SCRecordingOutput(
             configuration: recordingConfiguration,
             delegate: self
@@ -325,6 +382,11 @@ final class RecordingController: NSObject, ObservableObject {
         self.stream = stream
 
         try await stream.startCapture()
+
+        if captureCamera, let cameraRecorder, let cameraOutputURL {
+            try await cameraRecorder.startRecording(to: cameraOutputURL)
+        }
+
         // Do not start the cursor clock here. `startCapture()` only means the
         // stream is live; SCRecordingOutput can begin writing its first video
         // frame a little later. `recordingOutputDidStartRecording` is the
@@ -348,6 +410,25 @@ final class RecordingController: NSObject, ObservableObject {
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         let filename = "Screen Recording \(formatter.string(from: .now)).mp4"
         return directory.appendingPathComponent(filename)
+    }
+
+    private func cameraSidecarURL(for videoURL: URL) -> URL {
+        videoURL.deletingPathExtension().appendingPathExtension("camera.mp4")
+    }
+
+    private func cameraCornerSidecarURL(for videoURL: URL) -> URL {
+        videoURL.deletingPathExtension().appendingPathExtension("cameracorner.json")
+    }
+
+    private func saveCameraCorner(for videoURL: URL) {
+        let url = cameraCornerSidecarURL(for: videoURL)
+        let settings = CameraSettings(isEnabled: true, corner: cameraCorner, size: CameraOverlayGeometry.defaultSize)
+        do {
+            let data = try JSONEncoder().encode(settings)
+            try data.write(to: url)
+        } catch {
+            print("Failed to save camera corner: \(error)")
+        }
     }
 
     private func recordingDidStart() {
@@ -376,6 +457,15 @@ final class RecordingController: NSObject, ObservableObject {
     private func recordingDidFinish() {
         stopTimer()
         stopCursorTracking()
+        Task {
+            if let cameraRecorder {
+                _ = try? await cameraRecorder.stopRecording()
+            }
+            await finalizeRecording()
+        }
+    }
+
+    private func finalizeRecording() async {
         guard let outputURL else {
             state = .failed("The recording finished without creating a video file.")
             resetCaptureReferences()
@@ -383,6 +473,7 @@ final class RecordingController: NSObject, ObservableObject {
         }
 
         saveCursorTrack(for: outputURL)
+        saveCameraCorner(for: outputURL)
         resetCaptureReferences(keepingOutputURL: true)
         state = .finished(outputURL)
     }
@@ -390,6 +481,7 @@ final class RecordingController: NSObject, ObservableObject {
     private func finishWithError(_ error: Error) {
         stopTimer()
         stopCursorTracking()
+        cameraRecorder?.invalidate()
         resetCaptureReferences()
         state = .failed(error.localizedDescription)
     }
@@ -559,8 +651,33 @@ final class RecordingController: NSObject, ObservableObject {
         recordedDisplayID = nil
         captureBounds = .zero
         wasLeftButtonDown = false
+        overlayWindow?.close()
+        overlayWindow = nil
+        cameraRecorder?.invalidate()
+        cameraRecorder = nil
         if !keepingOutputURL {
             outputURL = nil
+            cameraOutputURL = nil
+            cameraCornerURL = nil
+        }
+    }
+
+    private func discoverCameras() {
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .external],
+            mediaType: .video,
+            position: .unspecified
+        )
+        let defaultDevice = AVCaptureDevice.default(for: .video)
+        availableCameras = session.devices.map { device in
+            CameraDevice(
+                id: device.uniqueID,
+                name: device.localizedName,
+                isDefault: device.uniqueID == defaultDevice?.uniqueID
+            )
+        }
+        if selectedCameraID == nil, let first = availableCameras.first {
+            selectedCameraID = first.id
         }
     }
 
@@ -615,6 +732,10 @@ final class RecordingController: NSObject, ObservableObject {
             return false
         }
     }
+
+    func requestCameraAuthorizationIfNeeded() async -> Bool {
+        await CameraRecorder.requestAccess()
+    }
 }
 
 extension RecordingController: SCRecordingOutputDelegate {
@@ -649,6 +770,7 @@ extension RecordingController: SCStreamDelegate {
 private enum RecordingError: LocalizedError {
     case noDisplay
     case microphoneDenied
+    case cameraDenied
 
     var errorDescription: String? {
         switch self {
@@ -656,6 +778,8 @@ private enum RecordingError: LocalizedError {
             "No display is available to record."
         case .microphoneDenied:
             "Microphone access was denied. Enable it in System Settings to record microphone audio."
+        case .cameraDenied:
+            "Camera access was denied. Enable it in System Settings to record camera video."
         }
     }
 }
