@@ -381,18 +381,11 @@ enum CursorArtwork {
     /// actual point of the arrow better than the pixel center when the cursor
     /// is rendered at small sizes.
     private static func detectTipHotspot(in image: NSImage) -> CGPoint? {
-        var rect = CGRect(origin: .zero, size: image.size)
-        guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
-            return nil
-        }
-        return detectTipHotspot(in: cgImage)
-    }
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
 
-    private static func detectTipHotspot(in image: CGImage) -> CGPoint? {
-        let width = image.width
-        let height = image.height
-        guard width > 0, height > 0 else { return nil }
-
+        let width = Int(size.width)
+        let height = Int(size.height)
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
         var data = [UInt8](repeating: 0, count: height * bytesPerRow)
@@ -406,10 +399,12 @@ enum CursorArtwork {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
-        // Draw with top-left origin into our buffer (flip so row 0 is top).
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: 1, y: -1)
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        // Render the NSImage directly; the resulting buffer has row 0 at the top,
+        // so scanning y = 0..<height finds the topmost pixel first.
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+        context.draw(cgImage, in: CGRect(origin: .zero, size: size))
 
         let alphaThreshold: UInt8 = 40
         // Topmost row with ink, then leftmost pixel on that row (arrow tip).
