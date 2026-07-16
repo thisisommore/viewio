@@ -550,29 +550,41 @@ private struct CursorPlayerOverlay: View {
             if let state = model.cursorPreview(at: model.playhead) {
                 let cursorSize = 28 * state.size
                 let hotspot = CursorArtwork.hotspot(for: state.style)
-                let tip = CGPoint(
-                    x: videoRect.minX + state.normalizedPosition.x * videoRect.width,
-                    y: videoRect.minY + state.normalizedPosition.y * videoRect.height
-                )
-                // SwiftUI `.position` anchors the view center; shift so the hotspot is at `tip`.
-                let center = CGPoint(
-                    x: tip.x + cursorSize * (0.5 - hotspot.x),
-                    y: tip.y + cursorSize * (0.5 - hotspot.y)
-                )
+                let cursorImage = CursorArtwork.image(style: state.style, scale: 2)
 
                 ZStack {
+                    // Motion-blur ghosts first (behind the live tip).
+                    ForEach(Array(state.trail.enumerated().reversed()), id: \.offset) { index, sample in
+                        let tip = CGPoint(
+                            x: videoRect.minX + sample.normalizedPosition.x * videoRect.width,
+                            y: videoRect.minY + sample.normalizedPosition.y * videoRect.height
+                        )
+                        let center = CGPoint(
+                            x: tip.x + cursorSize * (0.5 - hotspot.x),
+                            y: tip.y + cursorSize * (0.5 - hotspot.y)
+                        )
+                        Image(nsImage: cursorImage)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: cursorSize, height: cursorSize)
+                            .opacity(sample.opacity)
+                            .shadow(
+                                color: .black.opacity(index == 0 ? 0.25 : 0.08),
+                                radius: index == 0 ? 1.5 : 0.5,
+                                y: 0.5
+                            )
+                            .position(center)
+                    }
+
                     if let progress = state.clickProgress, state.clickEffect != .none {
+                        let tip = CGPoint(
+                            x: videoRect.minX + state.normalizedPosition.x * videoRect.width,
+                            y: videoRect.minY + state.normalizedPosition.y * videoRect.height
+                        )
                         ClickOverlayShape(effect: state.clickEffect, progress: progress)
                             .frame(width: cursorSize * 3.2, height: cursorSize * 3.2)
                             .position(tip)
                     }
-
-                    Image(nsImage: CursorArtwork.image(style: state.style, scale: 2))
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: cursorSize, height: cursorSize)
-                        .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
-                        .position(center)
                 }
                 .allowsHitTesting(false)
             }
@@ -1295,9 +1307,80 @@ private struct CursorInspectorPanel: View {
                         }
                     }
                 }
+
+                motionBlurSection
             }
         }
         .opacity(model.hasCursorData && !model.cursorSettings.isEnabled ? 0.85 : 1)
+    }
+
+    @ViewBuilder
+    private var motionBlurSection: some View {
+        sectionLabel("Motion blur")
+        Text("Smear on fast cursor moves and zoom pans. Turn off for a crisp look.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        HStack {
+            Text("Enabled")
+                .font(.callout)
+            Spacer()
+            Toggle(
+                "Enabled",
+                isOn: Binding(
+                    get: { model.motionBlurSettings.isEnabled },
+                    set: model.setMotionBlurEnabled
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .labelsHidden()
+        }
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Amount")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(String(format: "%.0f%%", model.motionBlurSettings.amount * 100))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { model.motionBlurSettings.amount },
+                    set: model.setMotionBlurAmount
+                ),
+                in: 0...1,
+                step: 0.05
+            )
+            .disabled(!model.motionBlurSettings.isEnabled)
+        }
+
+        Toggle(
+            "Cursor trail",
+            isOn: Binding(
+                get: { model.motionBlurSettings.applyToCursor },
+                set: model.setMotionBlurApplyToCursor
+            )
+        )
+        .toggleStyle(.checkbox)
+        .disabled(!model.motionBlurSettings.isEnabled)
+        .font(.callout)
+
+        Toggle(
+            "Zoom & pan",
+            isOn: Binding(
+                get: { model.motionBlurSettings.applyToZoom },
+                set: model.setMotionBlurApplyToZoom
+            )
+        )
+        .toggleStyle(.checkbox)
+        .disabled(!model.motionBlurSettings.isEnabled)
+        .font(.callout)
+        .help("Uses a high-quality compositor for directional blur during zooms.")
     }
 
     private var missingTrackBanner: some View {

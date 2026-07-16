@@ -3,7 +3,7 @@
 //  viewio
 //
 //  Builds a Core Animation tree that redraws the cursor from tracked samples
-//  (post-record), including motion styles and click effects.
+//  (post-record), including motion styles, click effects, and motion-blur trails.
 //
 
 import AppKit
@@ -14,10 +14,11 @@ import QuartzCore
 
 enum CursorOverlayBuilder {
     /// Attach a cursor overlay to the video composition when custom cursor is on
-    /// and track data is available.
+    /// and track data is available. Export-only (not valid on AVPlayerItem).
     static func apply(
         to videoComposition: AVMutableVideoComposition,
         settings: CursorSettings,
+        motionBlur: MotionBlurSettings,
         processedTrack: [CursorPosition],
         clickEvents: [ClickEvent],
         renderSize: CGSize,
@@ -36,19 +37,40 @@ enum CursorOverlayBuilder {
 
         let cursorSize = 32 * CGFloat(settings.size)
         let hotspot = CursorArtwork.hotspot(for: settings.style)
-        let cursorLayer = CALayer()
-        cursorLayer.contents = cursorCGImage
-        cursorLayer.contentsGravity = .resizeAspect
-        cursorLayer.bounds = CGRect(x: 0, y: 0, width: cursorSize, height: cursorSize)
-        cursorLayer.anchorPoint = hotspot
-        cursorLayer.zPosition = 10
 
         parentLayer.addSublayer(videoLayer)
+
+        // Motion-blur trail (ghosts), then solid head on top.
+        let trail = MotionBlurMath.trailTimes(at: 0, settings: motionBlur)
+        let ghostCount = max(0, trail.count - 1)
+        var ghostLayers: [CALayer] = []
+        if ghostCount > 0 {
+            for _ in 0..<ghostCount {
+                let ghost = makeCursorLayer(
+                    image: cursorCGImage,
+                    size: cursorSize,
+                    hotspot: hotspot,
+                    z: 9
+                )
+                ghost.opacity = 0
+                parentLayer.addSublayer(ghost)
+                ghostLayers.append(ghost)
+            }
+        }
+
+        let cursorLayer = makeCursorLayer(
+            image: cursorCGImage,
+            size: cursorSize,
+            hotspot: hotspot,
+            z: 10
+        )
         parentLayer.addSublayer(cursorLayer)
 
-        addPositionAnimation(
-            to: cursorLayer,
+        addTrailAnimations(
+            head: cursorLayer,
+            ghosts: ghostLayers,
             duration: duration,
+            motionBlur: motionBlur,
             displayPosition: displayPosition
         )
 
@@ -69,31 +91,112 @@ enum CursorOverlayBuilder {
         )
     }
 
-    // MARK: - Position
+    private static func makeCursorLayer(
+        image: CGImage,
+        size: CGFloat,
+        hotspot: CGPoint,
+        z: CGFloat
+    ) -> CALayer {
+        let layer = CALayer()
+        layer.contents = image
+        layer.contentsGravity = .resizeAspect
+        layer.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+        layer.anchorPoint = hotspot
+        layer.zPosition = z
+        return layer
+    }
 
-    private static func addPositionAnimation(
-        to layer: CALayer,
+    // MARK: - Trail / position
+
+    private static func addTrailAnimations(
+        head: CALayer,
+        ghosts: [CALayer],
         duration: Double,
+        motionBlur: MotionBlurSettings,
         displayPosition: @escaping (Double) -> CGPoint
     ) {
         let sampleRate = 60.0
         let step = 1.0 / sampleRate
         var times: [NSNumber] = []
-        var values: [CGPoint] = []
         times.reserveCapacity(Int(duration * sampleRate) + 2)
-        values.reserveCapacity(Int(duration * sampleRate) + 2)
+
+        var headValues: [CGPoint] = []
+        var ghostValues: [[CGPoint]] = Array(repeating: [], count: ghosts.count)
+        var ghostOpacities: [[NSNumber]] = Array(repeating: [], count: ghosts.count)
 
         var t = 0.0
         while t <= duration {
-            times.append(NSNumber(value: t / duration))
-            values.append(displayPosition(t))
+            let keyTime = NSNumber(value: t / duration)
+            times.append(keyTime)
+
+            let trail = MotionBlurMath.trailTimes(at: t, settings: motionBlur)
+            let headPoint = trail.first.map { displayPosition($0.time) } ?? displayPosition(t)
+            headValues.append(headPoint)
+
+            for ghostIndex in ghosts.indices {
+                let sampleIndex = ghostIndex + 1
+                if sampleIndex < trail.count {
+                    let sample = trail[sampleIndex]
+                    ghostValues[ghostIndex].append(displayPosition(sample.time))
+                    ghostOpacities[ghostIndex].append(NSNumber(value: sample.opacity))
+                } else {
+                    ghostValues[ghostIndex].append(headPoint)
+                    ghostOpacities[ghostIndex].append(0)
+                }
+            }
+
             t += step
         }
+
         if times.last?.doubleValue != 1 {
             times.append(1)
-            values.append(displayPosition(duration))
+            let trail = MotionBlurMath.trailTimes(at: duration, settings: motionBlur)
+            let headPoint = trail.first.map { displayPosition($0.time) } ?? displayPosition(duration)
+            headValues.append(headPoint)
+            for ghostIndex in ghosts.indices {
+                let sampleIndex = ghostIndex + 1
+                if sampleIndex < trail.count {
+                    let sample = trail[sampleIndex]
+                    ghostValues[ghostIndex].append(displayPosition(sample.time))
+                    ghostOpacities[ghostIndex].append(NSNumber(value: sample.opacity))
+                } else {
+                    ghostValues[ghostIndex].append(headPoint)
+                    ghostOpacities[ghostIndex].append(0)
+                }
+            }
         }
 
+        addPositionAnimation(to: head, times: times, values: headValues, duration: duration)
+        if let first = headValues.first {
+            head.position = first
+        }
+
+        for (index, ghost) in ghosts.enumerated() {
+            addPositionAnimation(to: ghost, times: times, values: ghostValues[index], duration: duration)
+            let opacity = CAKeyframeAnimation(keyPath: "opacity")
+            opacity.values = ghostOpacities[index]
+            opacity.keyTimes = times
+            opacity.duration = duration
+            opacity.calculationMode = .linear
+            opacity.fillMode = .forwards
+            opacity.isRemovedOnCompletion = false
+            opacity.beginTime = AVCoreAnimationBeginTimeAtZero
+            ghost.add(opacity, forKey: "cursorOpacity")
+            if let first = ghostValues[index].first {
+                ghost.position = first
+            }
+            if let firstOpacity = ghostOpacities[index].first {
+                ghost.opacity = firstOpacity.floatValue
+            }
+        }
+    }
+
+    private static func addPositionAnimation(
+        to layer: CALayer,
+        times: [NSNumber],
+        values: [CGPoint],
+        duration: Double
+    ) {
         let animation = CAKeyframeAnimation(keyPath: "position")
         animation.values = values.map { NSValue(point: $0) }
         animation.keyTimes = times
@@ -103,10 +206,6 @@ enum CursorOverlayBuilder {
         animation.isRemovedOnCompletion = false
         animation.beginTime = AVCoreAnimationBeginTimeAtZero
         layer.add(animation, forKey: "cursorPosition")
-
-        if let first = values.first {
-            layer.position = first
-        }
     }
 
     // MARK: - Clicks

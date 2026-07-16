@@ -123,10 +123,17 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 /// Live preview of the custom cursor (UI overlay — CA tool is export-only).
 struct CursorPreviewState: Equatable {
     var normalizedPosition: CGPoint
+    /// Index 0 is the live cursor; further entries are motion-blur ghosts.
+    var trail: [CursorTrailSample]
     var style: CursorStyle
     var size: Double
     var clickEffect: CursorClickEffect
     var clickProgress: Double?
+}
+
+struct CursorTrailSample: Equatable {
+    var normalizedPosition: CGPoint
+    var opacity: Double
 }
 
 @MainActor
@@ -157,6 +164,7 @@ final class EditorModel: ObservableObject {
     @Published var selectedZoomID: UUID?
     @Published var inspectorTab: InspectorTab = .edit
     @Published private(set) var cursorSettings: CursorSettings = .default
+    @Published private(set) var motionBlurSettings: MotionBlurSettings = .default
     @Published private(set) var hasCursorData = false
     /// Pixel size of the composed video frame (for letterboxed cursor overlay).
     @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
@@ -374,6 +382,46 @@ final class EditorModel: ObservableObject {
         cursorSettings = settings
     }
 
+    func setMotionBlurEnabled(_ enabled: Bool) {
+        guard motionBlurSettings.isEnabled != enabled else { return }
+        var settings = motionBlurSettings
+        settings.isEnabled = enabled
+        motionBlurSettings = settings
+        // Zoom blur is baked into the video composition.
+        if settings.applyToZoom {
+            rebuildPreview(preservingPlayhead: true)
+        }
+    }
+
+    func setMotionBlurAmount(_ amount: Double) {
+        let clamped = min(1, max(0, amount))
+        guard abs(motionBlurSettings.amount - clamped) > 0.001 else { return }
+        var settings = motionBlurSettings
+        settings.amount = clamped
+        motionBlurSettings = settings
+        if settings.isEnabled, settings.applyToZoom {
+            rebuildPreview(preservingPlayhead: true)
+        }
+    }
+
+    func setMotionBlurApplyToCursor(_ enabled: Bool) {
+        guard motionBlurSettings.applyToCursor != enabled else { return }
+        var settings = motionBlurSettings
+        settings.applyToCursor = enabled
+        motionBlurSettings = settings
+        // Cursor trail is a live overlay — no composition rebuild.
+    }
+
+    func setMotionBlurApplyToZoom(_ enabled: Bool) {
+        guard motionBlurSettings.applyToZoom != enabled else { return }
+        var settings = motionBlurSettings
+        settings.applyToZoom = enabled
+        motionBlurSettings = settings
+        if settings.isEnabled {
+            rebuildPreview(preservingPlayhead: true)
+        }
+    }
+
     /// Cursor state for the live player overlay (not baked into AVPlayerItem).
     func cursorPreview(at time: Double) -> CursorPreviewState? {
         guard cursorSettings.isEnabled, hasCursorData else { return nil }
@@ -381,11 +429,23 @@ final class EditorModel: ObservableObject {
         guard renderSize.width > 1, renderSize.height > 1 else { return nil }
 
         let baseTransform = sourceVideoTrack?.preferredTransform ?? .identity
-        let point = displayCursorPoint(at: time, renderSize: renderSize, baseTransform: baseTransform)
-        let normalized = CGPoint(
-            x: point.x / renderSize.width,
-            y: point.y / renderSize.height
-        )
+        let trailTimes = MotionBlurMath.trailTimes(at: time, settings: motionBlurSettings)
+        let trail: [CursorTrailSample] = trailTimes.compactMap { sample in
+            let point = displayCursorPoint(
+                at: sample.time,
+                renderSize: renderSize,
+                baseTransform: baseTransform
+            )
+            return CursorTrailSample(
+                normalizedPosition: CGPoint(
+                    x: point.x / renderSize.width,
+                    y: point.y / renderSize.height
+                ),
+                opacity: sample.opacity
+            )
+        }
+
+        guard let head = trail.first else { return nil }
 
         var clickProgress: Double?
         if cursorSettings.clickEffect != .none {
@@ -400,7 +460,8 @@ final class EditorModel: ObservableObject {
         }
 
         return CursorPreviewState(
-            normalizedPosition: normalized,
+            normalizedPosition: head.normalizedPosition,
+            trail: trail,
             style: cursorSettings.style,
             size: cursorSettings.size,
             clickEffect: cursorSettings.clickEffect,
@@ -824,26 +885,43 @@ final class EditorModel: ObservableObject {
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
 
-        let instruction = AVMutableVideoCompositionInstruction()
-        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
-
-        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
-        // Orientation lives only here (composition track preferredTransform is identity).
         let baseTransform = preferred
+        let zoomBlur = motionBlurSettings.zoomStrength
 
-        if zoomRanges.isEmpty {
-            layerInstruction.setTransform(baseTransform, at: .zero)
-        } else {
-            applyZoomRamps(
-                to: layerInstruction,
+        if zoomBlur > 0.001 {
+            // Custom compositor applies zoom + directional motion blur (preview + export).
+            let samples = buildZoomTransformSamples(
                 baseTransform: baseTransform,
                 renderSize: renderSize,
-                compositionDuration: duration
+                duration: duration.seconds
             )
-        }
+            let instruction = ViewioCompositionInstruction(
+                timeRange: CMTimeRange(start: .zero, duration: duration),
+                sourceTrackID: compositionTrack.trackID,
+                renderSize: renderSize,
+                keyframes: samples,
+                motionBlurAmount: zoomBlur
+            )
+            videoComposition.instructions = [instruction]
+            videoComposition.customVideoCompositorClass = ViewioVideoCompositor.self
+        } else {
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
 
-        instruction.layerInstructions = [layerInstruction]
-        videoComposition.instructions = [instruction]
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
+            if zoomRanges.isEmpty {
+                layerInstruction.setTransform(baseTransform, at: .zero)
+            } else {
+                applyZoomRamps(
+                    to: layerInstruction,
+                    baseTransform: baseTransform,
+                    renderSize: renderSize,
+                    compositionDuration: duration
+                )
+            }
+            instruction.layerInstructions = [layerInstruction]
+            videoComposition.instructions = [instruction]
+        }
 
         // AVVideoCompositionCoreAnimationTool is offline-only (export). Using it on
         // AVPlayerItem crashes with NSInvalidArgumentException.
@@ -852,6 +930,7 @@ final class EditorModel: ObservableObject {
             CursorOverlayBuilder.apply(
                 to: videoComposition,
                 settings: cursorSettings,
+                motionBlur: motionBlurSettings,
                 processedTrack: processedCursorTrack,
                 clickEvents: clicks,
                 renderSize: renderSize,
@@ -866,6 +945,60 @@ final class EditorModel: ObservableObject {
         }
 
         return videoComposition
+    }
+
+    /// Dense transform samples for the custom motion-blur compositor.
+    private func buildZoomTransformSamples(
+        baseTransform: CGAffineTransform,
+        renderSize: CGSize,
+        duration: Double
+    ) -> [ZoomTransformSample] {
+        let step = 1.0 / 30.0
+        var samples: [ZoomTransformSample] = []
+        samples.reserveCapacity(Int(duration / step) + 3)
+
+        var t = 0.0
+        while t <= duration + 0.0001 {
+            let time = min(duration, t)
+            let scale: CGFloat
+            let focus: CGPoint
+            let zoom: CGAffineTransform
+
+            if let range = zoomRanges.first(where: { time >= $0.start && time <= $0.end }) {
+                let length = max(0.001, range.end - range.start)
+                let transition = transitionDuration(for: range, totalDuration: length)
+                scale = zoomScale(at: time, range: range, transition: transition)
+                focus = focusPoint(for: range)
+                zoom = zoomTransform(
+                    renderSize: renderSize,
+                    scale: scale,
+                    center: focus,
+                    targetAmount: CGFloat(min(3, max(1, range.amount)))
+                )
+            } else {
+                scale = 1
+                focus = CGPoint(x: 0.5, y: 0.5)
+                zoom = .identity
+            }
+
+            let transform = finiteTransform(baseTransform.concatenating(zoom)) ?? baseTransform
+            samples.append(
+                ZoomTransformSample(time: time, transform: transform, focus: focus, scale: scale)
+            )
+            t += step
+        }
+
+        if samples.last.map({ $0.time < duration - 0.0001 }) ?? true {
+            samples.append(
+                ZoomTransformSample(
+                    time: duration,
+                    transform: baseTransform,
+                    focus: CGPoint(x: 0.5, y: 0.5),
+                    scale: 1
+                )
+            )
+        }
+        return samples
     }
 
     private func refreshProcessedCursorTrack() {
