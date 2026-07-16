@@ -169,6 +169,7 @@ final class RecordingController: NSObject, ObservableObject {
     private var startedAt: Date?
     private var timer: Timer?
     private var cursorTimer: Timer?
+    private var cursorEventMonitor: Any?
     private var cursorTrack: [CursorPosition] = []
     private var clickEvents: [ClickEvent] = []
     private var recordedDisplayID: CGDirectDisplayID?
@@ -324,10 +325,10 @@ final class RecordingController: NSObject, ObservableObject {
         self.stream = stream
 
         try await stream.startCapture()
-
-        if case .preparing = state {
-            recordingDidStart()
-        }
+        // Do not start the cursor clock here. `startCapture()` only means the
+        // stream is live; SCRecordingOutput can begin writing its first video
+        // frame a little later. `recordingOutputDidStartRecording` is the
+        // matching zero point for the movie timeline.
     }
 
     private func makeOutputURL() throws -> URL {
@@ -426,6 +427,21 @@ final class RecordingController: NSObject, ObservableObject {
         }
         RunLoop.main.add(timer, forMode: .common)
         cursorTimer = timer
+        // Polling alone can be a frame late while the pointer is moving. Listen
+        // to the real global mouse events as well, so the track contains the
+        // exact position and timestamp used for a move or click.
+        let eventMask: NSEvent.EventTypeMask = [
+            .mouseMoved,
+            .leftMouseDragged,
+            .rightMouseDragged,
+            .otherMouseDragged,
+            .leftMouseDown
+        ]
+        cursorEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.recordCursorEvent(event, bounds: bounds)
+            }
+        }
         // Immediate sample at t≈0 so the first frame is aligned.
         sampleCursor(bounds: bounds)
     }
@@ -433,32 +449,76 @@ final class RecordingController: NSObject, ObservableObject {
     private func sampleCursor(bounds: CGRect) {
         guard let hostStart = recordingHostStart else { return }
         // NSEvent.mouseLocation is the cursor *hotspot* in global Cocoa points.
-        let location = NSEvent.mouseLocation
+        let time = ProcessInfo.processInfo.systemUptime - hostStart
+        appendCursorSample(
+            at: NSEvent.mouseLocation,
+            time: time,
+            bounds: bounds
+        )
+        recordClickIfNeeded(at: time)
+    }
+
+    private func recordCursorEvent(_ event: NSEvent, bounds: CGRect) {
+        guard let hostStart = recordingHostStart else { return }
+        // Global-monitor events normally have no window, in which case AppKit
+        // provides a screen-space point. Convert defensively if one does.
+        let location: CGPoint
+        if let window = event.window {
+            location = window.convertPoint(toScreen: event.locationInWindow)
+        } else {
+            location = event.locationInWindow
+        }
+        let time = max(0, event.timestamp - hostStart)
+        appendCursorSample(at: location, time: time, bounds: bounds)
+
+        if event.type == .leftMouseDown {
+            recordClick(at: time)
+            wasLeftButtonDown = true
+        }
+    }
+
+    private func appendCursorSample(at location: CGPoint, time: TimeInterval, bounds: CGRect) {
         let relativeX = (location.x - bounds.origin.x) / bounds.width
         // Cocoa Y is bottom-up; store already flipped to video top-left (0 = top)
         // so playback never double-flips or mixes conventions.
         let relativeYFromTop = 1 - (location.y - bounds.origin.y) / bounds.height
-        let time = ProcessInfo.processInfo.systemUptime - hostStart
         let position = CursorPosition(
             time: max(0, time),
             x: max(0, min(1, relativeX)),
             y: max(0, min(1, relativeYFromTop))
         )
-        cursorTrack.append(position)
-        recordClickIfNeeded(at: position.time)
+        // Event monitors are asynchronous, so an event can arrive just after a
+        // timer sample. Keep the timeline ordered for interpolation in preview.
+        if let last = cursorTrack.last, position.time < last.time {
+            let index = cursorTrack.firstIndex { $0.time > position.time } ?? cursorTrack.endIndex
+            cursorTrack.insert(position, at: index)
+        } else {
+            cursorTrack.append(position)
+        }
     }
 
     private func recordClickIfNeeded(at time: TimeInterval) {
         let isDown = CGEventSource.buttonState(.combinedSessionState, button: .left)
         if isDown && !wasLeftButtonDown {
-            clickEvents.append(ClickEvent(time: time, button: 0))
+            recordClick(at: time)
         }
         wasLeftButtonDown = isDown
+    }
+
+    private func recordClick(at time: TimeInterval) {
+        // A timer sample and the matching mouse-down event can arrive together.
+        // Keep one click at the event's precise timestamp.
+        guard clickEvents.last.map({ abs($0.time - time) > 0.04 }) ?? true else { return }
+        clickEvents.append(ClickEvent(time: time, button: 0))
     }
 
     private func stopCursorTracking() {
         cursorTimer?.invalidate()
         cursorTimer = nil
+        if let cursorEventMonitor {
+            NSEvent.removeMonitor(cursorEventMonitor)
+            self.cursorEventMonitor = nil
+        }
     }
 
     private func saveCursorTrack(for videoURL: URL) {

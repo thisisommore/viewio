@@ -327,7 +327,14 @@ enum CursorArtwork {
 
         let rendered: NSImage
         let hotspot: CGPoint
-        if let folder = style.systemCursorFolder,
+        if style == .macArrow,
+           let systemArrow = loadSystemArrow() {
+            // The default arrow is the cursor macOS actually presents while
+            // recording. Reusing both its bitmap and hotspot keeps its visible
+            // tip at precisely the same point in the preview.
+            rendered = systemArrow.image
+            hotspot = systemArrow.hotspot
+        } else if let folder = style.systemCursorFolder,
            let system = renderSystemCursor(folder: folder, pixelScale: max(2, scale)) {
             rendered = system.image
             // Apple's hotx/hoty are the real click point for each system cursor.
@@ -434,6 +441,25 @@ enum CursorArtwork {
         var height: CGFloat
         var hotX: CGFloat
         var hotY: CGFloat
+    }
+
+    /// `arrow` is the one native pointer whose artwork is not exposed in the
+    /// HIServices cursor folders. AppKit exposes its rendered image and the
+    /// matching top-left hotspot directly.
+    private static func loadSystemArrow() -> (image: NSImage, hotspot: CGPoint)? {
+        let cursor = NSCursor.arrow
+        let image = cursor.image
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
+
+        let hotSpot = cursor.hotSpot
+        return (
+            image,
+            CGPoint(
+                x: min(1, max(0, hotSpot.x / size.width)),
+                y: min(1, max(0, hotSpot.y / size.height))
+            )
+        )
     }
 
     private static func loadSystemCursorMetadata(folder: String) -> SystemCursorMetadata? {
