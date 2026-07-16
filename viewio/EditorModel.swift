@@ -188,6 +188,7 @@ final class EditorModel: ObservableObject {
         }
     }
 
+
     var timelineClips: [TimelineClipLayout] {
         var cursor = 0.0
         return clips.map { clip in
@@ -412,48 +413,164 @@ final class EditorModel: ObservableObject {
 
         var candidates: [ZoomRange] = []
 
+        // Clicks always produce a tight zoom window.
         for click in clickEvents {
-            // Wider windows so entry/exit can ease over ~0.85s without feeling rushed.
-            let start = max(0, click.time - 0.9)
-            let end = min(duration, max(start + 1.2, click.time + 1.4))
-            candidates.append(ZoomRange(start: start, end: end))
-        }
-
-        for pause in findPauseSegments() {
-            let start = max(0, pause.start - 0.5)
-            let end = min(duration, max(start + 1.0, pause.end + 0.5))
-            candidates.append(ZoomRange(start: start, end: end))
-        }
-
-        // Fallback: if there are no clicks/pauses, still place zooms on low-motion dwells.
-        if candidates.isEmpty {
-            candidates.append(contentsOf: findDwellZoomCandidates())
-        }
-
-        let merged = mergeZoomRanges(candidates)
-            .map { clampZoomRange($0, in: duration) }
-            .filter { $0.end - $0.start >= 0.6 }
-
-        let built = merged.compactMap { range -> ZoomRange? in
-            let positions = cursorPositions(in: range.start...range.end)
-            let spread = spatialSpread(of: positions)
-            // Allow slightly larger spreads so auto-zoom still fires on normal mouse use.
-            guard spread <= 0.85 else { return nil }
-            let amount = min(2.2, max(1.25, 1.25 + (1 - spread) * 1.1))
-            return ZoomRange(
-                id: range.id,
-                start: range.start,
-                end: range.end,
-                amount: amount,
-                entryAnimation: .smooth,
-                exitAnimation: .smooth
+            let start = max(0, click.time - 0.55)
+            let end = min(duration, click.time + 1.15)
+            let local = cursorPositions(in: max(0, click.time - 0.25)...min(duration, click.time + 0.25))
+            let spread = spatialSpread(of: local)
+            let amount = min(2.1, max(1.35, 1.45 + (1 - min(1, spread)) * 0.7))
+            candidates.append(
+                ZoomRange(
+                    start: start,
+                    end: max(start + 1.0, end),
+                    amount: amount,
+                    entryAnimation: .smooth,
+                    exitAnimation: .smooth
+                )
             )
         }
 
-        // Cap count so the compositor is not flooded with transform ramps.
-        zoomRanges = Array(built.prefix(24))
+        // Pauses: keep only compact, low-motion segments (cap length).
+        for pause in findPauseSegments() {
+            let pauseMid = (pause.start + pause.end) / 2
+            let pauseLen = min(2.4, max(1.0, pause.end - pause.start + 0.6))
+            let start = max(0, pauseMid - pauseLen / 2)
+            let end = min(duration, start + pauseLen)
+            let local = cursorPositions(in: start...end)
+            let spread = spatialSpread(of: local)
+            guard spread <= 0.35 else { continue }
+            let amount = min(2.0, max(1.3, 1.35 + (1 - spread) * 0.75))
+            candidates.append(
+                ZoomRange(
+                    start: start,
+                    end: end,
+                    amount: amount,
+                    entryAnimation: .smooth,
+                    exitAnimation: .smooth
+                )
+            )
+        }
+
+        if candidates.isEmpty {
+            candidates.append(contentsOf: findDwellZoomCandidates())
+            candidates = candidates.compactMap { range in
+                let spread = spatialSpread(of: cursorPositions(in: range.start...range.end))
+                guard spread <= 0.45 else { return nil }
+                let amount = min(1.9, max(1.3, 1.35 + (1 - spread) * 0.7))
+                return ZoomRange(
+                    id: range.id,
+                    start: range.start,
+                    end: range.end,
+                    amount: amount,
+                    entryAnimation: .smooth,
+                    exitAnimation: .smooth
+                )
+            }
+        }
+
+        let resolved = resolveNonOverlappingZoomRanges(
+            candidates
+                .map { clampZoomRange($0, in: duration) }
+                .map { capZoomRangeDuration($0, maxDuration: 2.8) },
+            minGap: 0.15,
+            minLength: 0.7
+        )
+
+        zoomRanges = Array(resolved.prefix(16))
         selectedZoomID = zoomRanges.first?.id
         rebuildPreview(preservingPlayhead: true)
+    }
+
+    /// Ensures zoom windows never overlap. On conflict, keep the stronger zoom
+    /// (higher amount) and trim or drop the other so a gap remains.
+    private func resolveNonOverlappingZoomRanges(
+        _ ranges: [ZoomRange],
+        minGap: Double,
+        minLength: Double
+    ) -> [ZoomRange] {
+        guard !ranges.isEmpty else { return [] }
+
+        let sorted = ranges.sorted { a, b in
+            if abs(a.start - b.start) < 0.001 {
+                return a.amount > b.amount
+            }
+            return a.start < b.start
+        }
+
+        var result: [ZoomRange] = []
+
+        for candidate in sorted {
+            var range = candidate
+            guard range.end - range.start >= minLength else { continue }
+
+            if result.isEmpty {
+                result.append(range)
+                continue
+            }
+
+            let lastIndex = result.count - 1
+            var last = result[lastIndex]
+
+            if range.start >= last.end + minGap {
+                result.append(range)
+                continue
+            }
+
+            let trimmedStart = last.end + minGap
+            if range.end - trimmedStart >= minLength {
+                range.start = trimmedStart
+                result.append(range)
+                continue
+            }
+
+            if range.amount > last.amount + 0.05 {
+                let roomEnd = range.start - minGap
+                if roomEnd - last.start >= minLength {
+                    last.end = roomEnd
+                    result[lastIndex] = last
+                    result.append(range)
+                } else {
+                    result[lastIndex] = range
+                }
+            }
+        }
+
+        var cleaned: [ZoomRange] = []
+        for range in result.sorted(by: { $0.start < $1.start }) {
+            guard let current = cleaned.last else {
+                cleaned.append(range)
+                continue
+            }
+            if range.start >= current.end + minGap {
+                cleaned.append(range)
+            } else {
+                let start = current.end + minGap
+                if range.end - start >= minLength {
+                    var trimmed = range
+                    trimmed.start = start
+                    cleaned.append(trimmed)
+                } else if range.amount > current.amount {
+                    cleaned[cleaned.count - 1] = range
+                }
+            }
+        }
+
+        return cleaned
+    }
+
+    private func capZoomRangeDuration(_ range: ZoomRange, maxDuration: Double) -> ZoomRange {
+        let length = range.end - range.start
+        guard length > maxDuration else { return range }
+        let mid = (range.start + range.end) / 2
+        return ZoomRange(
+            id: range.id,
+            start: mid - maxDuration / 2,
+            end: mid + maxDuration / 2,
+            amount: range.amount,
+            entryAnimation: range.entryAnimation,
+            exitAnimation: range.exitAnimation
+        )
     }
 
     private func clampZoomRange(_ range: ZoomRange, in duration: Double) -> ZoomRange {
@@ -630,7 +747,11 @@ final class EditorModel: ObservableObject {
             return nil
         }
 
-        compositionVideoTrack.preferredTransform = sourceVideoTrack.preferredTransform
+        // When a video composition supplies layer transforms, keep the track
+        // preferredTransform identity to avoid double-applying orientation
+        // (a common VRP failure mode).
+        compositionVideoTrack.preferredTransform = .identity
+
         let compositionAudioTracks = sourceAudioTracks.compactMap { _ in
             composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
         }
@@ -664,6 +785,7 @@ final class EditorModel: ObservableObject {
             cursor = cursor + outputDuration
         }
 
+
         let videoComposition = makeVideoComposition(
             compositionTrack: compositionVideoTrack,
             sourceTrack: sourceVideoTrack,
@@ -685,15 +807,15 @@ final class EditorModel: ObservableObject {
         includeCursorOverlay: Bool
     ) -> AVMutableVideoComposition {
         let naturalSize = sourceTrack.naturalSize
-        let transformedSize = naturalSize.applying(sourceTrack.preferredTransform)
-        // Even dimensions avoid rare VRP failures with some decoders/compositors.
-        let rawWidth = max(2, abs(transformedSize.width))
-        let rawHeight = max(2, abs(transformedSize.height))
+        let preferred = sourceTrack.preferredTransform
+        let transformedSize = naturalSize.applying(preferred)
+        // Integer pixel size — fractional render sizes can trip the VRP.
         let renderSize = CGSize(
-            width: (rawWidth / 2).rounded(.down) * 2,
-            height: (rawHeight / 2).rounded(.down) * 2
+            width: max(2, abs(transformedSize.width).rounded()),
+            height: max(2, abs(transformedSize.height).rounded())
         )
         videoRenderSize = renderSize
+
 
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = renderSize
@@ -703,15 +825,19 @@ final class EditorModel: ObservableObject {
         instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
 
         let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
-        let baseTransform = sourceTrack.preferredTransform
-        layerInstruction.setTransform(baseTransform, at: .zero)
+        // Orientation lives only here (composition track preferredTransform is identity).
+        let baseTransform = preferred
 
-        applyZoomRamps(
-            to: layerInstruction,
-            baseTransform: baseTransform,
-            renderSize: renderSize,
-            duration: duration.seconds
-        )
+        if zoomRanges.isEmpty {
+            layerInstruction.setTransform(baseTransform, at: .zero)
+        } else {
+            applyZoomRamps(
+                to: layerInstruction,
+                baseTransform: baseTransform,
+                renderSize: renderSize,
+                compositionDuration: duration
+            )
+        }
 
         instruction.layerInstructions = [layerInstruction]
         videoComposition.instructions = [instruction]
@@ -762,9 +888,9 @@ final class EditorModel: ObservableObject {
             y: normalized.y * renderSize.height
         )
 
-        // Match transformForZoom: preferred orientation first, then zoom.
+        // Match video composition: baseTransform.concatenating(zoom).
         let zoom = activeZoomTransform(at: time, renderSize: renderSize)
-        let transformed = sourcePoint.applying(zoom.concatenating(baseTransform))
+        let transformed = sourcePoint.applying(baseTransform.concatenating(zoom))
         return CGPoint(
             x: min(renderSize.width, max(0, transformed.x)),
             y: min(renderSize.height, max(0, transformed.y))
@@ -778,12 +904,8 @@ final class EditorModel: ObservableObject {
         let rangeDuration = max(0.001, range.end - range.start)
         let transition = transitionDuration(for: range, totalDuration: rangeDuration)
         let scale = zoomScale(at: time, range: range, transition: transition)
-        // Zoom focus follows the processed cursor so motion style and framing stay in sync.
-        let center = CursorMotion.position(
-            at: time,
-            in: processedCursorTrack,
-            motion: cursorSettings.motion
-        )
+        // Prefer stable focus; fall back to live cursor for overlay smoothness.
+        let center = focusPoint(for: range)
         return zoomTransform(
             renderSize: renderSize,
             scale: scale,
@@ -944,119 +1066,159 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    /// Sparse, strictly-valid transform ramps. Dense per-frame ramps and mixed
+    /// setTransform/setTransformRamp usage cause VRP err=-12852.
     private func applyZoomRamps(
         to layerInstruction: AVMutableVideoCompositionLayerInstruction,
         baseTransform: CGAffineTransform,
         renderSize: CGSize,
-        duration: Double
+        compositionDuration: CMTime
     ) {
-        guard duration > 0, !zoomRanges.isEmpty else { return }
+        let timescale: CMTimeScale = 600
+        let total = CMTimeConvertScale(compositionDuration, timescale: timescale, method: .default)
+        let totalSeconds = total.seconds
+        guard totalSeconds > 0.05, total.isValid, !total.seconds.isNaN else {
+            layerInstruction.setTransform(baseTransform, at: .zero)
+            return
+        }
 
-        // Build one monotonic keyframe list, then emit non-overlapping ramps.
-        // Flooding AVFoundation with 60fps ramps + conflicting setTransform calls
-        // triggers VRP err=-12852 and breaks playback.
-        let timescale: CMTimeScale = 60_000
-        let sampleInterval = 1.0 / 20.0
-        var keyframes: [(time: Double, transform: CGAffineTransform)] = [
-            (0, sanitizedTransform(baseTransform))
+        let safeBase = finiteTransform(baseTransform) ?? .identity
+        let ranges = nonOverlappingZoomRanges(duration: totalSeconds)
+        guard !ranges.isEmpty else {
+            layerInstruction.setTransform(safeBase, at: .zero)
+            return
+        }
+
+        struct Keyframe {
+            var time: CMTime
+            var transform: CGAffineTransform
+        }
+
+        var keyframes: [Keyframe] = [
+            Keyframe(time: .zero, transform: safeBase)
         ]
 
-        let sorted = zoomRanges
-            .map { clampZoomRange($0, in: duration) }
-            .filter { $0.end - $0.start > 0.05 }
-            .sorted { $0.start < $1.start }
+        func append(_ seconds: Double, _ transform: CGAffineTransform) {
+            var t = CMTime(seconds: min(totalSeconds, max(0, seconds)), preferredTimescale: timescale)
+            if CMTimeCompare(t, total) > 0 { t = total }
+            if CMTimeCompare(t, .zero) < 0 { t = .zero }
 
-        for range in sorted {
-            let start = range.start
-            let end = range.end
-            let transition = transitionDuration(for: range, totalDuration: end - start)
+            guard let xf = finiteTransform(transform) else { return }
 
-            // Gap before this zoom: hold base transform.
-            if let last = keyframes.last, last.time < start - 0.0005 {
-                appendKeyframe(&keyframes, time: start, transform: baseTransform)
+            if let last = keyframes.last {
+                let cmp = CMTimeCompare(t, last.time)
+                if cmp < 0 { return }
+                if cmp == 0 {
+                    keyframes[keyframes.count - 1] = Keyframe(time: t, transform: xf)
+                    return
+                }
             }
+            keyframes.append(Keyframe(time: t, transform: xf))
+        }
 
-            var sampleTime = start
-            while sampleTime < end - 0.0005 {
-                let transform = transformForZoom(
-                    at: sampleTime,
-                    range: range,
-                    transition: transition,
-                    baseTransform: baseTransform,
-                    renderSize: renderSize
-                )
-                appendKeyframe(&keyframes, time: sampleTime, transform: transform)
-                sampleTime += sampleInterval
-            }
+        for range in ranges {
+            let length = range.end - range.start
+            guard length > 0.08 else { continue }
 
-            let endTransform = transformForZoom(
-                at: end,
-                range: range,
-                transition: transition,
-                baseTransform: baseTransform,
-                renderSize: renderSize
+            let transition = min(
+                transitionDuration(for: range, totalDuration: length),
+                length * 0.45
             )
-            appendKeyframe(&keyframes, time: end, transform: endTransform)
+            let amount = CGFloat(min(2.5, max(1.15, range.amount)))
+            let focus = focusPoint(for: range)
 
-            // Settle back to base after exit so later content is stable.
-            let settle = min(duration, end + 1.0 / 30.0)
-            appendKeyframe(&keyframes, time: settle, transform: baseTransform)
+            func transform(scale: CGFloat, center: CGPoint) -> CGAffineTransform {
+                let zoom = zoomTransform(
+                    renderSize: renderSize,
+                    scale: scale,
+                    center: center,
+                    targetAmount: amount
+                )
+                return safeBase.concatenating(zoom)
+            }
+
+            let entryEnd = range.start + transition
+            let exitStart = range.end - transition
+
+            append(range.start, safeBase)
+            append(entryEnd, transform(scale: amount, center: focus))
+
+            if exitStart > entryEnd + 0.05 {
+                append(exitStart, transform(scale: amount, center: focus))
+            }
+
+            append(range.end, safeBase)
         }
 
-        if let last = keyframes.last, last.time < duration {
-            appendKeyframe(&keyframes, time: duration, transform: baseTransform)
+        if let last = keyframes.last, CMTimeCompare(last.time, total) < 0 {
+            keyframes.append(Keyframe(time: total, transform: safeBase))
         }
 
+        var rampCount = 0
         for index in 0..<(keyframes.count - 1) {
             let from = keyframes[index]
             let to = keyframes[index + 1]
-            let delta = to.time - from.time
-            guard delta > 0.0008 else { continue }
+            guard CMTimeCompare(to.time, from.time) > 0 else { continue }
 
-            let startTime = CMTime(seconds: from.time, preferredTimescale: timescale)
-            let endTime = CMTime(seconds: to.time, preferredTimescale: timescale)
-            let timeRange = CMTimeRange(start: startTime, end: endTime)
+            let timeRange = CMTimeRange(start: from.time, end: to.time)
             guard timeRange.duration.isValid,
-                  timeRange.duration.seconds > 0,
-                  !timeRange.duration.seconds.isNaN else {
+                  CMTimeCompare(timeRange.duration, .zero) > 0 else {
                 continue
             }
+
+            let instructionRange = CMTimeRange(start: .zero, duration: total)
+            let clamped = instructionRange.intersection(timeRange)
+            guard CMTimeCompare(clamped.duration, .zero) > 0 else { continue }
 
             layerInstruction.setTransformRamp(
                 fromStart: from.transform,
                 toEnd: to.transform,
-                timeRange: timeRange
+                timeRange: clamped
             )
+            rampCount += 1
+            if rampCount >= 40 { break }
+        }
+
+        if rampCount == 0 {
+            layerInstruction.setTransform(safeBase, at: .zero)
         }
     }
 
-    private func appendKeyframe(
-        _ keyframes: inout [(time: Double, transform: CGAffineTransform)],
-        time: Double,
-        transform: CGAffineTransform
-    ) {
-        let safe = sanitizedTransform(transform)
-        if let last = keyframes.last {
-            if abs(last.time - time) < 0.0005 {
-                keyframes[keyframes.count - 1] = (time, safe)
-                return
-            }
-            if last.time > time {
-                return
-            }
-        }
-        keyframes.append((time, safe))
+    /// Sorted zoom windows with overlaps trimmed (never merged into one long zoom).
+    private func nonOverlappingZoomRanges(duration: Double) -> [ZoomRange] {
+        resolveNonOverlappingZoomRanges(
+            zoomRanges
+                .map { clampZoomRange($0, in: duration) }
+                .filter { $0.end - $0.start > 0.08 },
+            minGap: 0.05,
+            minLength: 0.08
+        )
     }
 
-    private func sanitizedTransform(_ transform: CGAffineTransform) -> CGAffineTransform {
+    /// Average cursor position in a range (stable zoom anchor).
+    private func focusPoint(for range: ZoomRange) -> CGPoint {
+        let samples = cursorPositions(in: range.start...range.end)
+        if samples.isEmpty {
+            return cursorPosition(at: (range.start + range.end) / 2)
+        }
+        // Convert Cocoa Y → video Y the same way as CursorMotion.process.
+        let xs = samples.map(\.x)
+        let ys = samples.map { 1 - $0.y }
+        let x = xs.reduce(0, +) / Double(xs.count)
+        let y = ys.reduce(0, +) / Double(ys.count)
+        return CGPoint(
+            x: min(1, max(0, x)),
+            y: min(1, max(0, y))
+        )
+    }
+
+    private func finiteTransform(_ transform: CGAffineTransform) -> CGAffineTransform? {
         let values = [transform.a, transform.b, transform.c, transform.d, transform.tx, transform.ty]
-        guard values.allSatisfy(\.isFinite) else {
-            return .identity
-        }
-        // Reject degenerate scales that can crash the video render pipeline.
-        guard abs(transform.a) > 0.01, abs(transform.d) > 0.01 else {
-            return .identity
-        }
+        guard values.allSatisfy(\.isFinite) else { return nil }
+        // Reject only true zeros determinant (non-invertible), not rotated bases
+        // where a or d may be ~0.
+        let det = transform.a * transform.d - transform.b * transform.c
+        guard abs(det) > 1e-6 else { return nil }
         return transform
     }
 
@@ -1075,8 +1237,7 @@ final class EditorModel: ObservableObject {
             center: center,
             targetAmount: CGFloat(min(3, max(1, range.amount)))
         )
-        // Apply preferred orientation first, then zoom in the oriented frame.
-        return sanitizedTransform(zoom.concatenating(baseTransform))
+        return finiteTransform(baseTransform.concatenating(zoom)) ?? baseTransform
     }
 
     private func applyTransformAnimation(

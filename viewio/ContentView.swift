@@ -1101,12 +1101,32 @@ private struct CursorInspectorPanel: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                sectionLabel("Appearance")
+                sectionLabel("macOS cursors")
+                Text("Loaded from the real system cursor assets on this Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: 72), spacing: 8)],
                     spacing: 8
                 ) {
-                    ForEach(CursorStyle.allCases) { style in
+                    ForEach(CursorStyle.allCases.filter(\.isNativeMacOS)) { style in
+                        CursorStyleCard(
+                            style: style,
+                            isSelected: model.cursorSettings.style == style,
+                            isEnabled: model.cursorSettings.isEnabled
+                        ) {
+                            model.setCursorStyle(style)
+                        }
+                    }
+                }
+
+                sectionLabel("Custom")
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 72), spacing: 8)],
+                    spacing: 8
+                ) {
+                    ForEach(CursorStyle.allCases.filter { !$0.isNativeMacOS }) { style in
                         CursorStyleCard(
                             style: style,
                             isSelected: model.cursorSettings.style == style,
