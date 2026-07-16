@@ -406,7 +406,10 @@ enum CursorArtwork {
         }
 
         context.clear(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
-        context.scaleBy(x: scale, y: scale)
+        // Bitmap contexts are bottom-up; flip while drawing so the PDF is upright
+        // in the final image (tip at the top).
+        context.translateBy(x: 0, y: CGFloat(pixelHeight))
+        context.scaleBy(x: scale, y: -scale)
         context.drawPDFPage(page)
 
         guard let cgImage = context.makeImage() else { return nil }
@@ -414,6 +417,7 @@ enum CursorArtwork {
         let image = NSImage(cgImage: cgImage, size: size)
 
         let meta = loadSystemCursorMetadata(folder: folder)
+        // hotx/hoty in info.plist are from the top-left of the cursor artwork.
         let hotspot = CGPoint(
             x: (meta?.hotX ?? box.width * 0.2) / max(box.width, 1),
             y: (meta?.hotY ?? box.height * 0.15) / max(box.height, 1)
@@ -426,7 +430,6 @@ enum CursorArtwork {
     private static func renderDrawnCursor(style: CursorStyle, scale: CGFloat) -> NSImage {
         let base: CGFloat = 32
         let pixel = base * scale
-        let size = NSSize(width: pixel, height: pixel)
 
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(
@@ -438,18 +441,17 @@ enum CursorArtwork {
                 space: colorSpace,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
               ) else {
-            return NSImage(size: size)
+            return NSImage(size: NSSize(width: pixel, height: pixel))
         }
 
         context.clear(CGRect(origin: .zero, size: CGSize(width: pixel, height: pixel)))
-        // Draw in top-left friendly space: flip so y grows downward for hotspot math,
-        // then use bottom-left path coords consistent with prior arrow geometry.
+        // Flip Y so we can draw in top-left space (y down), matching how the
+        // hotspot and SwiftUI/CALayer present the bitmap.
         context.translateBy(x: 0, y: pixel)
         context.scaleBy(x: scale, y: -scale)
 
         switch style {
         case .macArrow:
-            // Official-looking white pointer with black outline + soft shadow.
             drawMacArrow(
                 in: context,
                 fill: .white,
@@ -478,17 +480,16 @@ enum CursorArtwork {
         case .dot:
             drawDot(in: context)
         default:
-            // Fallback if a system PDF is missing on this OS version.
             drawMacArrow(in: context, fill: .white, stroke: .black, lineWidth: 1.15, shadow: true)
         }
 
         guard let cgImage = context.makeImage() else {
-            return NSImage(size: size)
+            return NSImage(size: NSSize(width: pixel, height: pixel))
         }
         return NSImage(cgImage: cgImage, size: NSSize(width: base, height: base))
     }
 
-    /// Accurate macOS-style arrow (point-size 32 box, tip near top-left).
+    /// macOS-style arrow in top-left space (y grows downward). Tip near (5, 4).
     private static func drawMacArrow(
         in context: CGContext,
         fill: NSColor,
@@ -496,21 +497,19 @@ enum CursorArtwork {
         lineWidth: CGFloat,
         shadow: Bool
     ) {
-        // Coordinates use bottom-left origin after the flip in renderDrawnCursor.
-        // Tip ~ (5, 28) which is top of the 32pt box.
         let path = CGMutablePath()
-        path.move(to: CGPoint(x: 5, y: 28))
-        path.addLine(to: CGPoint(x: 5, y: 7))
-        path.addLine(to: CGPoint(x: 10.5, y: 12.5))
-        path.addLine(to: CGPoint(x: 15.5, y: 3.5))
-        path.addLine(to: CGPoint(x: 18.2, y: 4.8))
-        path.addLine(to: CGPoint(x: 13.2, y: 13.8))
-        path.addLine(to: CGPoint(x: 21.5, y: 13.8))
+        path.move(to: CGPoint(x: 5, y: 4))
+        path.addLine(to: CGPoint(x: 5, y: 25))
+        path.addLine(to: CGPoint(x: 10.5, y: 19.5))
+        path.addLine(to: CGPoint(x: 15.5, y: 28.5))
+        path.addLine(to: CGPoint(x: 18.2, y: 27.2))
+        path.addLine(to: CGPoint(x: 13.2, y: 18.2))
+        path.addLine(to: CGPoint(x: 21.5, y: 18.2))
         path.closeSubpath()
 
         if shadow {
             context.setShadow(
-                offset: CGSize(width: 0, height: -1),
+                offset: CGSize(width: 0, height: 1),
                 blur: 1.8,
                 color: NSColor.black.withAlphaComponent(0.28).cgColor
             )
@@ -531,18 +530,18 @@ enum CursorArtwork {
 
     private static func drawModernArrow(in context: CGContext) {
         let path = CGMutablePath()
-        path.move(to: CGPoint(x: 5, y: 27))
-        path.addLine(to: CGPoint(x: 5, y: 7))
-        path.addQuadCurve(to: CGPoint(x: 11, y: 12), control: CGPoint(x: 7, y: 9))
-        path.addLine(to: CGPoint(x: 16, y: 4))
-        path.addQuadCurve(to: CGPoint(x: 19, y: 6), control: CGPoint(x: 18, y: 4))
-        path.addLine(to: CGPoint(x: 13.5, y: 13.5))
-        path.addQuadCurve(to: CGPoint(x: 22, y: 14), control: CGPoint(x: 18, y: 13))
-        path.addQuadCurve(to: CGPoint(x: 5, y: 27), control: CGPoint(x: 14, y: 22))
+        path.move(to: CGPoint(x: 5, y: 5))
+        path.addLine(to: CGPoint(x: 5, y: 25))
+        path.addQuadCurve(to: CGPoint(x: 11, y: 20), control: CGPoint(x: 7, y: 23))
+        path.addLine(to: CGPoint(x: 16, y: 28))
+        path.addQuadCurve(to: CGPoint(x: 19, y: 26), control: CGPoint(x: 18, y: 28))
+        path.addLine(to: CGPoint(x: 13.5, y: 18.5))
+        path.addQuadCurve(to: CGPoint(x: 22, y: 18), control: CGPoint(x: 18, y: 19))
+        path.addQuadCurve(to: CGPoint(x: 5, y: 5), control: CGPoint(x: 14, y: 10))
         path.closeSubpath()
 
         context.setShadow(
-            offset: CGSize(width: 0, height: -1),
+            offset: CGSize(width: 0, height: 1),
             blur: 1.5,
             color: NSColor.black.withAlphaComponent(0.22).cgColor
         )
@@ -560,7 +559,7 @@ enum CursorArtwork {
     private static func drawDot(in context: CGContext) {
         let rect = CGRect(x: 10, y: 10, width: 12, height: 12)
         context.setShadow(
-            offset: CGSize(width: 0, height: -1),
+            offset: CGSize(width: 0, height: 1),
             blur: 2.5,
             color: NSColor.black.withAlphaComponent(0.25).cgColor
         )
