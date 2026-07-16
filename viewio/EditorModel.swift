@@ -173,9 +173,11 @@ final class EditorModel: ObservableObject {
     @Published private(set) var cameraSettings: CameraSettings = .default
     @Published private(set) var hasCameraVideo = false
     @Published var isBackgroundEnabled: Bool
+    @Published var backgroundCornerRadius: Double
     /// Pixel size of the composed video frame (for letterboxed cursor overlay).
     @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
 
+    private(set) var captureMode: CaptureMode
     private var cursorTrack: [CursorPosition] = []
     /// Precise video-space track (no smoothing) — used to draw the cursor on content.
     private var preciseCursorTrack: [CursorPosition] = []
@@ -205,7 +207,9 @@ final class EditorModel: ObservableObject {
 
     init(sourceURL: URL, captureMode: CaptureMode = .display) {
         self.sourceURL = sourceURL
+        self.captureMode = captureMode
         self.isBackgroundEnabled = (captureMode == .window)
+        self.backgroundCornerRadius = 28
         installTimeObserver()
         wallpaperManager.loadWallpapersIfNeeded()
         wallpaperCancellable = wallpaperManager.$selectedWallpaperID
@@ -393,6 +397,13 @@ final class EditorModel: ObservableObject {
     func setBackgroundEnabled(_ enabled: Bool) {
         guard isBackgroundEnabled != enabled else { return }
         isBackgroundEnabled = enabled
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setBackgroundCornerRadius(_ radius: Double) {
+        let clamped = min(120, max(0, radius))
+        guard abs(backgroundCornerRadius - clamped) > 0.001 else { return }
+        backgroundCornerRadius = clamped
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -900,6 +911,7 @@ final class EditorModel: ObservableObject {
             .flatMap { wallpaperManager.wallpaper(withID: $0) }
             .flatMap { FileManager.default.fileExists(atPath: $0.localURL.path) ? $0.localURL : nil }
         let includeWallpaper = isBackgroundEnabled && selectedWallpaperURL != nil
+        let applyRoundedCorners = isBackgroundEnabled && captureMode == .window
 
         // When a wallpaper is active, shrink the video slightly and center it so
         // the background image shows around the edges.
@@ -966,7 +978,9 @@ final class EditorModel: ObservableObject {
                 motionBlurAmount: includeCamera ? 0 : zoomBlur,
                 cameraTrackID: includeCamera ? cameraTrack?.trackID : nil,
                 cameraTransform: cameraTransform,
-                backgroundImageURL: selectedWallpaperURL
+                backgroundImageURL: selectedWallpaperURL,
+                applyRoundedCorners: applyRoundedCorners,
+                cornerRadius: CGFloat(backgroundCornerRadius)
             )
             videoComposition.instructions = [instruction]
             videoComposition.customVideoCompositorClass = ViewioVideoCompositor.self

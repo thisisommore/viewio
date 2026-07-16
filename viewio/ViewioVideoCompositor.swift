@@ -33,6 +33,11 @@ final class ViewioCompositionInstruction: NSObject, AVVideoCompositionInstructio
     let cameraTransform: CGAffineTransform?
     /// Local file URL of a static image to draw behind the source video.
     let backgroundImageURL: URL?
+    /// When true, mask the source video with rounded corners so window captures
+    /// don't show black corners over the wallpaper background.
+    let applyRoundedCorners: Bool
+    /// Radius (in source image pixels) of the rounded-corner mask.
+    let cornerRadius: CGFloat
 
     init(
         timeRange: CMTimeRange,
@@ -42,7 +47,9 @@ final class ViewioCompositionInstruction: NSObject, AVVideoCompositionInstructio
         motionBlurAmount: Double,
         cameraTrackID: CMPersistentTrackID? = nil,
         cameraTransform: CGAffineTransform? = nil,
-        backgroundImageURL: URL? = nil
+        backgroundImageURL: URL? = nil,
+        applyRoundedCorners: Bool = false,
+        cornerRadius: CGFloat = 28
     ) {
         self.timeRange = timeRange
         self.sourceTrackID = sourceTrackID
@@ -52,6 +59,8 @@ final class ViewioCompositionInstruction: NSObject, AVVideoCompositionInstructio
         self.cameraTrackID = cameraTrackID
         self.cameraTransform = cameraTransform
         self.backgroundImageURL = backgroundImageURL
+        self.applyRoundedCorners = applyRoundedCorners
+        self.cornerRadius = max(0, cornerRadius)
         var required: [NSValue] = [NSNumber(value: sourceTrackID)]
         if let cameraTrackID {
             required.append(NSNumber(value: cameraTrackID))
@@ -163,6 +172,13 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
             let sample = instruction.sample(at: seconds)
             var image = CIImage(cvPixelBuffer: sourceBuffer)
             let render = instruction.renderSize
+
+            // Window captures have black pixels in the rounded corners of the
+            // window frame. Mask them out at the source image size before the
+            // placement/zoom transform so the corners track the actual window.
+            if instruction.applyRoundedCorners {
+                image = applyRoundedCorners(to: image, radius: instruction.cornerRadius)
+            }
 
             // AVVideoComposition transforms use a top-left origin; Core Image is
             // bottom-left — convert before applying the zoom matrix.
@@ -296,6 +312,27 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
     private func avTransformToCI(_ transform: CGAffineTransform, height: CGFloat) -> CGAffineTransform {
         let flip = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: height)
         return flip.concatenating(transform).concatenating(flip)
+    }
+
+    /// Masks the source image to a rounded rectangle so window captures don't
+    /// leave black corners over the background wallpaper.
+    private func applyRoundedCorners(to image: CIImage, radius: CGFloat) -> CIImage {
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0, radius > 0 else { return image }
+        guard let mask = roundedRectMask(size: extent.size, radius: radius) else { return image }
+        let clear = CIImage(color: .clear).cropped(to: extent)
+        return image.applyingFilter("CIBlendWithMask", parameters: [
+            kCIInputBackgroundImageKey: clear,
+            kCIInputMaskImageKey: mask
+        ])
+    }
+
+    private func roundedRectMask(size: CGSize, radius: CGFloat) -> CIImage? {
+        guard let filter = CIFilter(name: "CIRoundedRectangleGenerator") else { return nil }
+        filter.setValue(CIVector(cgRect: CGRect(origin: .zero, size: size)), forKey: "inputExtent")
+        filter.setValue(radius, forKey: "inputRadius")
+        filter.setValue(CIColor.white, forKey: "inputColor")
+        return filter.outputImage
     }
 
     private enum CompositorError: LocalizedError {

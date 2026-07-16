@@ -1782,6 +1782,28 @@ private struct BackgroundInspectorPanel: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                if model.captureMode == .window {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Corner radius")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(String(format: "%.0f px", model.backgroundCornerRadius))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { model.backgroundCornerRadius },
+                                set: model.setBackgroundCornerRadius
+                            ),
+                            in: 0...120,
+                            step: 1
+                        )
+                    }
+                }
+
                 ScrollView {
                     LazyVGrid(
                         columns: [GridItem(.adaptive(minimum: 72), spacing: 8)],
