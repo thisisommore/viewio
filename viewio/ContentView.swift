@@ -1138,7 +1138,7 @@ private struct TimelineView: View {
                     .padding(.top, 27)
 
                 GeometryReader { proxy in
-                    let trackWidth = max(1, proxy.size.width - 14)
+                    let trackWidth = max(1, proxy.size.width - 40)
                     let duration = max(0.01, model.duration)
 
                     ZStack(alignment: .topLeading) {
@@ -1146,12 +1146,14 @@ private struct TimelineView: View {
 
                         ForEach(model.timelineClips) { layout in
                             let x = trackWidth * CGFloat(layout.start / duration)
-                            let width = max(2, trackWidth * CGFloat(layout.duration / duration) - 2)
+                            let width = max(2, trackWidth * CGFloat(layout.duration / duration))
 
                             TimelineClipBlock(
                                 title: model.clipTitle,
                                 speed: layout.clip.speed,
-                                isSelected: model.selectedClipID == layout.clip.id
+                                isSelected: model.selectedClipID == layout.clip.id,
+                                thumbnails: model.thumbnailsForClip(layout.clip),
+                                videoAspect: model.videoRenderSize.width / max(1, model.videoRenderSize.height)
                             )
                             .frame(width: width, height: 48)
                             .offset(x: x, y: 24)
@@ -1172,7 +1174,7 @@ private struct TimelineView: View {
                                 model.seek(to: Double(value.location.x / trackWidth) * duration)
                             }
                     )
-                    .padding(.trailing, 14)
+                    .padding(.trailing, 40)
                 }
             }
             .padding(.top, 2)
@@ -1190,7 +1192,9 @@ private struct TimelineRuler: View {
     var body: some View {
         ForEach(0...6, id: \.self) { marker in
             let fraction = CGFloat(marker) / 6
-            VStack(alignment: .leading, spacing: 3) {
+            let isFirst = marker == 0
+            let isLast = marker == 6
+            VStack(alignment: isLast ? .trailing : .leading, spacing: 3) {
                 Text(formattedDuration(duration * Double(fraction)))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.tertiary)
@@ -1198,7 +1202,8 @@ private struct TimelineRuler: View {
                     .fill(Color.primary.opacity(0.15))
                     .frame(width: 1, height: 5)
             }
-            .offset(x: width * fraction, y: 5)
+            .frame(width: isLast ? 30 : nil, alignment: isLast ? .trailing : .leading)
+            .offset(x: isLast ? width - 30 : (isFirst ? 0 : width * fraction - 15), y: 5)
         }
     }
 }
@@ -1207,17 +1212,38 @@ private struct TimelineClipBlock: View {
     let title: String
     let speed: Double
     let isSelected: Bool
+    let thumbnails: [NSImage]
+    let videoAspect: CGFloat
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            HStack(spacing: 1) {
-                ForEach(0..<18, id: \.self) { index in
-                    Color(
-                        red: 0.22 + Double(index.isMultiple(of: 4) ? 0.09 : 0),
-                        green: 0.33 + Double(index.isMultiple(of: 5) ? 0.08 : 0),
-                        blue: 0.45 + Double(index.isMultiple(of: 3) ? 0.08 : 0)
-                    )
+            if thumbnails.isEmpty {
+                HStack(spacing: 1) {
+                    ForEach(0..<18, id: \.self) { index in
+                        Color(
+                            red: 0.22 + Double(index.isMultiple(of: 4) ? 0.09 : 0),
+                            green: 0.33 + Double(index.isMultiple(of: 5) ? 0.08 : 0),
+                            blue: 0.45 + Double(index.isMultiple(of: 3) ? 0.08 : 0)
+                        )
+                    }
                 }
+            } else {
+                // Flexible base keeps the block at the frame width; the rigid image
+                // strip would otherwise oversize it and get centered past 00:00.
+                Color.clear
+                    .overlay(alignment: .leading) {
+                        HStack(spacing: 1) {
+                            ForEach(thumbnails.indices, id: \.self) { index in
+                                Image(nsImage: thumbnails[index])
+                                    .resizable()
+                                    .interpolation(.high)
+                                    .aspectRatio(contentMode: .fill)
+                                    .frame(width: 48 * videoAspect, height: 48)
+                                    .clipped()
+                            }
+                        }
+                    }
+                    .clipped()
             }
 
             LinearGradient(
@@ -1240,7 +1266,7 @@ private struct TimelineClipBlock: View {
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .overlay {
             RoundedRectangle(cornerRadius: 5)
-                .stroke(isSelected ? Color.accentColor : .black.opacity(0.45), lineWidth: isSelected ? 2 : 1)
+                .strokeBorder(isSelected ? Color.accentColor : .black.opacity(0.45), lineWidth: isSelected ? 2 : 1)
         }
     }
 }

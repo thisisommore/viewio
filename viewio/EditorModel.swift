@@ -185,6 +185,8 @@ final class EditorModel: ObservableObject {
     @Published var backgroundCornerRadius: Double
     /// Pixel size of the composed video frame (for letterboxed cursor overlay).
     @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
+    @Published private(set) var timelineThumbnails: [NSImage] = []
+    @Published private(set) var timelineThumbnailTimes: [Double] = []
 
     private(set) var captureMode: CaptureMode
     private var cursorTrack: [CursorPosition] = []
@@ -839,8 +841,51 @@ final class EditorModel: ObservableObject {
             duration = seconds
             loadState = .ready
             rebuildPreview(preservingPlayhead: false)
+
+            Task {
+                await generateTimelineThumbnails(asset: asset, duration: seconds)
+            }
         } catch {
             loadState = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Generates evenly spaced frame thumbnails for the timeline.
+    private func generateTimelineThumbnails(asset: AVURLAsset, duration: Double) async {
+        guard duration > 0.1 else { return }
+        let count = max(40, min(120, Int(duration / 0.25)))
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.maximumSize = CGSize(width: 320, height: 180)
+
+        var images: [NSImage] = []
+        var times: [Double] = []
+
+        for index in 0..<count {
+            let time = duration * Double(index) / Double(count)
+            do {
+                let cgImage = try generator.copyCGImage(
+                    at: CMTime(seconds: time, preferredTimescale: 600),
+                    actualTime: nil
+                )
+                images.append(NSImage(cgImage: cgImage, size: CGSize(width: cgImage.width, height: cgImage.height)))
+                times.append(time)
+            } catch {
+                continue
+            }
+        }
+
+        timelineThumbnails = images
+        timelineThumbnailTimes = times
+    }
+
+    /// Returns the thumbnails that fall within a clip's source time range.
+    func thumbnailsForClip(_ clip: EditClip) -> [NSImage] {
+        let range = clip.sourceStart...clip.sourceEnd
+        return timelineThumbnailTimes.enumerated().compactMap { index, time in
+            range.contains(time) ? timelineThumbnails[index] : nil
         }
     }
 
