@@ -75,40 +75,78 @@ private struct RecordingStartView: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 32) {
+                VStack(alignment: .leading, spacing: 28) {
                     if let errorMessage {
                         errorBanner(message: errorMessage)
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("New Recording")
-                            .font(.system(size: 26, weight: .bold))
-                        Text("Choose a capture source and audio sources, then start recording.")
-                            .font(.system(size: 14))
+                            .font(.title2.bold())
+                        Text("Choose what to capture — everything else is ready to go.")
+                            .font(.callout)
                             .foregroundStyle(.secondary)
                     }
 
-                    CaptureOptionsView(recorder: recorder, isPreparing: isPreparing)
+                    CaptureSourceSection(recorder: recorder, isPreparing: isPreparing)
 
-                    VideoQualityOptionsView(recorder: recorder, isPreparing: isPreparing)
-
-                    AudioOptionsView(recorder: recorder, isPreparing: isPreparing)
-
-                    CameraOptionsView(recorder: recorder, isPreparing: isPreparing)
+                    RecordingSettingsSection(recorder: recorder, isPreparing: isPreparing)
                 }
                 .padding(32)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: 620)
+                .frame(maxWidth: .infinity)
             }
 
             Divider()
 
-            Button(action: onRecord) {
-                Text("Start Recording")
-                    .font(.system(size: 16, weight: .semibold))
+            HStack(spacing: 16) {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer(minLength: 0)
+
+                Button("Start Recording", action: onRecord)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.large)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isPreparing)
             }
-            .buttonStyle(RecordButtonStyle(isDisabled: isPreparing))
-            .disabled(isPreparing)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
         }
+    }
+
+    /// One-line recap of the current setup shown next to the Start button.
+    private var summary: String {
+        var parts: [String] = [recorder.captureMode.title]
+        switch recorder.captureMode {
+        case .display:
+            if let display = recorder.availableDisplays.first(where: { $0.id == recorder.selectedDisplayID })
+                ?? recorder.availableDisplays.first {
+                parts.append(display.name)
+            }
+        case .window:
+            if let window = recorder.availableWindows.first(where: { $0.id == recorder.selectedWindowID }) {
+                parts.append(window.appName)
+            }
+        }
+        parts.append(recorder.selectedResolution.title)
+        parts.append(recorder.selectedFrameRate.title)
+        if recorder.captureSystemAudio {
+            parts.append("System audio")
+        }
+        if recorder.captureMicrophone, let micID = recorder.selectedMicrophoneID,
+           let mic = recorder.availableMicrophones.first(where: { $0.id == micID }) {
+            parts.append(mic.name)
+        }
+        if recorder.captureCamera {
+            parts.append("Camera")
+        }
+        return parts.joined(separator: " · ")
     }
 
     private func errorBanner(message: String) -> some View {
@@ -152,146 +190,231 @@ private struct RecordButtonStyle: ButtonStyle {
     }
 }
 
-private struct CaptureOptionsView: View {
+private struct CaptureSourceSection: View {
     @ObservedObject var recorder: RecordingController
     let isPreparing: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Capture Source")
-
-            HStack(alignment: .top, spacing: 12) {
-                SelectionCard(
-                    title: CaptureMode.display.title,
-                    isSelected: recorder.captureMode == .display,
-                    isDisabled: isPreparing
-                ) {
-                    recorder.captureMode = .display
-                }
-                .frame(width: 116)
-
-                SelectionCard(
-                    title: CaptureMode.window.title,
-                    isSelected: recorder.captureMode == .window,
-                    isDisabled: isPreparing
-                ) {
-                    recorder.captureMode = .window
-                }
-                .frame(width: 116)
-            }
-
-            if recorder.captureMode == .display {
-                displayGrid
-            } else {
-                windowGrid
-            }
-        }
-    }
-
-    private var displayGrid: some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 120, maximum: 180), spacing: 12)],
-            alignment: .leading,
-            spacing: 12
-        ) {
-            ForEach(recorder.availableDisplays) { display in
-                SelectionCard(
-                    title: display.name,
-                    isSelected: recorder.selectedDisplayID == display.id,
-                    isDisabled: isPreparing
-                ) {
-                    recorder.selectedDisplayID = display.id
-                }
-            }
-        }
-    }
-
-    private var windowGrid: some View {
         VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                ForEach(CaptureMode.allCases) { mode in
+                    SourceCard(
+                        title: mode.title,
+                        systemImage: mode == .display ? "display" : "macwindow",
+                        isSelected: recorder.captureMode == mode,
+                        action: { recorder.captureMode = mode }
+                    )
+                }
+            }
+            .disabled(isPreparing)
+
+            sourcePicker
+        }
+    }
+
+    @ViewBuilder
+    private var sourcePicker: some View {
+        switch recorder.captureMode {
+        case .display:
+            Picker("Display", selection: $recorder.selectedDisplayID) {
+                ForEach(recorder.availableDisplays) { display in
+                    Text(display.name).tag(Optional(display.id))
+                }
+            }
+            .disabled(isPreparing)
+        case .window:
             if recorder.availableWindows.isEmpty {
                 Text("No windows found. Make sure the window you want to record is visible on screen.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .onAppear { recorder.discoverWindows() }
             } else {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 140, maximum: 200), spacing: 12)],
-                    alignment: .leading,
-                    spacing: 12
-                ) {
+                Picker("Window", selection: $recorder.selectedWindowID) {
                     ForEach(recorder.availableWindows) { window in
-                        SelectionCard(
-                            title: window.appName,
-                            subtitle: window.title,
-                            isSelected: recorder.selectedWindowID == window.id,
-                            isDisabled: isPreparing
-                        ) {
-                            recorder.selectedWindowID = window.id
-                        }
+                        Text("\(window.appName) — \(window.title)").tag(Optional(window.id))
                     }
                 }
+                .disabled(isPreparing)
+                .onAppear { recorder.discoverWindows() }
             }
-        }
-        .onAppear {
-            recorder.discoverWindows()
         }
     }
 }
 
-private struct VideoQualityOptionsView: View {
-    @ObservedObject var recorder: RecordingController
-    let isPreparing: Bool
+private struct SourceCard: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let action: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 14) {
-                sectionTitle("Resolution")
-                Text(resolutionHint)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 24))
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 84)
+        }
+        .buttonStyle(SourceCardStyle(isSelected: isSelected))
+    }
+}
 
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 100, maximum: 140), spacing: 10)],
-                    alignment: .leading,
-                    spacing: 10
-                ) {
-                    ForEach(RecordingResolution.allCases) { resolution in
-                        SelectionCard(
-                            title: resolution.title,
-                            subtitle: resolution.subtitle,
-                            isSelected: recorder.selectedResolution == resolution,
-                            isDisabled: isPreparing
-                        ) {
-                            recorder.selectedResolution = resolution
+private struct SourceCardStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isSelected ? Color.accentColor : .primary)
+            .background {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected
+                          ? Color.accentColor.opacity(configuration.isPressed ? 0.18 : 0.12)
+                          : Color.primary.opacity(configuration.isPressed ? 0.1 : 0.05))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isSelected ? Color.accentColor : Color.primary.opacity(0.1),
+                            lineWidth: isSelected ? 2 : 1)
+            }
+    }
+}
+
+private struct RecordingSettingsSection: View {
+    @ObservedObject var recorder: RecordingController
+    let isPreparing: Bool
+    @State private var isRequestingAuthorization = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(spacing: 0) {
+                SettingsRow(icon: "aspectratio", tint: .blue, title: "Resolution") {
+                    Picker(selection: $recorder.selectedResolution) {
+                        ForEach(RecordingResolution.allCases) { resolution in
+                            Text(resolution.title).tag(resolution)
                         }
+                    } label: {
+                        EmptyView()
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .disabled(isPreparing)
+                }
+
+                Divider().padding(.leading, 44)
+
+                SettingsRow(icon: "film", tint: .indigo, title: "Frame Rate") {
+                    Picker(selection: $recorder.selectedFrameRate) {
+                        ForEach(RecordingFrameRate.allCases) { fps in
+                            Text(fps.title).tag(fps)
+                        }
+                    } label: {
+                        EmptyView()
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .disabled(isPreparing)
+                }
+
+                Divider().padding(.leading, 44)
+
+                SettingsRow(icon: "speaker.wave.2", tint: .pink, title: "System Audio") {
+                    Toggle(isOn: $recorder.captureSystemAudio) {
+                        EmptyView()
+                    }
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .disabled(isPreparing)
+                }
+
+                if !recorder.availableMicrophones.isEmpty {
+                    Divider().padding(.leading, 44)
+
+                    SettingsRow(icon: "mic", tint: .orange, title: "Microphone") {
+                        Picker(selection: microphoneSelection) {
+                            Text("None").tag(String?.none)
+                            ForEach(recorder.availableMicrophones) { device in
+                                Text(device.name).tag(Optional(device.id))
+                            }
+                        } label: {
+                            EmptyView()
+                        }
+                        .labelsHidden()
+                        .disabled(isPreparing)
+                    }
+                }
+
+                if !recorder.availableCameras.isEmpty {
+                    Divider().padding(.leading, 44)
+
+                    SettingsRow(icon: "video", tint: .green, title: "Camera") {
+                        Picker(selection: cameraSelection) {
+                            Text("Off").tag(String?.none)
+                            ForEach(recorder.availableCameras) { device in
+                                Text(device.name).tag(Optional(device.id))
+                            }
+                        } label: {
+                            EmptyView()
+                        }
+                        .labelsHidden()
+                        .disabled(isPreparing || isRequestingAuthorization)
                     }
                 }
             }
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
 
-            VStack(alignment: .leading, spacing: 14) {
-                sectionTitle("Frame rate")
-                Text("Higher FPS is smoother; lower FPS keeps files smaller.")
+            Text(resolutionHint)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if recorder.captureCamera {
+                Text("A picture-in-picture camera overlay will be recorded separately so you can move it after recording.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 100, maximum: 140), spacing: 10)],
-                    alignment: .leading,
-                    spacing: 10
-                ) {
-                    ForEach(RecordingFrameRate.allCases) { fps in
-                        SelectionCard(
-                            title: fps.title,
-                            subtitle: fps.subtitle,
-                            isSelected: recorder.selectedFrameRate == fps,
-                            isDisabled: isPreparing
-                        ) {
-                            recorder.selectedFrameRate = fps
-                        }
-                    }
-                }
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// Maps the menu picker onto the captureMicrophone/selectedMicrophoneID pair.
+    private var microphoneSelection: Binding<String?> {
+        Binding(
+            get: { recorder.captureMicrophone ? recorder.selectedMicrophoneID : nil },
+            set: { newValue in
+                if let id = newValue {
+                    recorder.captureMicrophone = true
+                    recorder.selectedMicrophoneID = id
+                } else {
+                    recorder.captureMicrophone = false
+                    recorder.selectedMicrophoneID = nil
+                }
+            }
+        )
+    }
+
+    /// Same mapping for camera, but enabling one requires authorization first.
+    private var cameraSelection: Binding<String?> {
+        Binding(
+            get: { recorder.captureCamera ? recorder.selectedCameraID : nil },
+            set: { newValue in
+                guard let id = newValue else {
+                    recorder.captureCamera = false
+                    return
+                }
+                Task {
+                    isRequestingAuthorization = true
+                    let granted = await recorder.requestCameraAuthorizationIfNeeded()
+                    isRequestingAuthorization = false
+                    if granted {
+                        recorder.selectedCameraID = id
+                        recorder.captureCamera = true
+                    }
+                }
+            }
+        )
     }
 
     private var resolutionHint: String {
@@ -333,155 +456,30 @@ private struct VideoQualityOptionsView: View {
     }
 }
 
-private struct AudioOptionsView: View {
-    @ObservedObject var recorder: RecordingController
-    let isPreparing: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Audio")
-
-            HStack(alignment: .top, spacing: 12) {
-                SelectionCard(
-                    title: "System",
-                    isSelected: recorder.captureSystemAudio,
-                    isDisabled: isPreparing
-                ) {
-                    recorder.captureSystemAudio.toggle()
-                }
-                .frame(width: 116)
-
-                if !recorder.availableMicrophones.isEmpty {
-                    Divider()
-                        .frame(width: 1)
-                        .background(Color.primary.opacity(0.15))
-
-                    ForEach(recorder.availableMicrophones) { device in
-                        let isSelected = recorder.captureMicrophone && recorder.selectedMicrophoneID == device.id
-                        SelectionCard(
-                            title: device.name,
-                            isSelected: isSelected,
-                            isDisabled: isPreparing
-                        ) {
-                            if isSelected {
-                                recorder.captureMicrophone = false
-                                recorder.selectedMicrophoneID = nil
-                            } else {
-                                recorder.captureMicrophone = true
-                                recorder.selectedMicrophoneID = device.id
-                            }
-                        }
-                        .frame(width: 116)
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct CameraOptionsView: View {
-    @ObservedObject var recorder: RecordingController
-    let isPreparing: Bool
-    @State private var isRequestingAuthorization = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Camera")
-
-            HStack(alignment: .top, spacing: 12) {
-                SelectionCard(
-                    title: "Off",
-                    isSelected: !recorder.captureCamera,
-                    isDisabled: isPreparing || isRequestingAuthorization
-                ) {
-                    recorder.captureCamera = false
-                }
-                .frame(width: 116)
-
-                ForEach(recorder.availableCameras) { device in
-                    let isSelected = recorder.captureCamera && recorder.selectedCameraID == device.id
-                    SelectionCard(
-                        title: device.name,
-                        isSelected: isSelected,
-                        isDisabled: isPreparing || isRequestingAuthorization
-                    ) {
-                        Task {
-                            if !isSelected {
-                                isRequestingAuthorization = true
-                                let granted = await recorder.requestCameraAuthorizationIfNeeded()
-                                isRequestingAuthorization = false
-                                if granted {
-                                    recorder.selectedCameraID = device.id
-                                    recorder.captureCamera = true
-                                }
-                            }
-                        }
-                    }
-                    .frame(width: 116)
-                }
-            }
-
-            if recorder.captureCamera {
-                Text("A picture-in-picture camera overlay will be recorded separately so you can move it after recording.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
-private struct SelectionCard: View {
+private struct SettingsRow<Control: View>: View {
+    let icon: String
+    let tint: Color
     let title: String
-    var subtitle: String? = nil
-    let isSelected: Bool
-    let isDisabled: Bool
-    let action: () -> Void
+    @ViewBuilder var control: Control
 
     var body: some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 22, height: 22)
+                .background(tint.gradient, in: RoundedRectangle(cornerRadius: 5))
+
+            Text(title)
+                .font(.system(size: 13))
+
+            Spacer(minLength: 12)
+
+            control
         }
-        .buttonStyle(SelectionCardStyle(isSelected: isSelected))
-        .disabled(isDisabled)
-        .aspectRatio(1.25, contentMode: .fit)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
-}
-
-private struct SelectionCardStyle: ButtonStyle {
-    let isSelected: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(.primary)
-            .background {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.primary.opacity(configuration.isPressed ? 0.1 : 0.05))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.primary.opacity(isSelected ? 0.6 : 0.1), lineWidth: isSelected ? 2 : 1)
-            }
-    }
-}
-
-private func sectionTitle(_ title: String) -> some View {
-    Text(title)
-        .font(.system(size: 14, weight: .semibold))
 }
 
 private struct RecordingProgressView: View {
