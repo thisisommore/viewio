@@ -376,13 +376,15 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
                 let ghost = cursor.applyingFilter("CIColorMatrix", parameters: [
                     "inputAVector": CIVector(x: 0, y: 0, z: 0, w: CGFloat(opacity))
                 ])
-                result = place(cursor: ghost, hotspot: data.hotspot, size: data.size, at: point, over: result)
+                let ghostScale = data.clickEffect.shrinkScale(at: ghostTime, clickTimes: data.clickTimes)
+                result = place(cursor: ghost, hotspot: data.hotspot, size: data.size, at: point, over: result, scaleMultiplier: ghostScale)
             }
         }
 
         // Live head — the hotspot lands exactly on the tracked point.
         let headPoint = cursorFramePoint(at: time, data: data, instruction: instruction, renderSize: renderSize)
-        result = place(cursor: cursor, hotspot: data.hotspot, size: data.size, at: headPoint, over: result)
+        let headScale = data.clickEffect.shrinkScale(at: time, clickTimes: data.clickTimes)
+        result = place(cursor: cursor, hotspot: data.hotspot, size: data.size, at: headPoint, over: result, scaleMultiplier: headScale)
 
         if data.clickEffect != .none {
             result = drawClickEffects(over: result, at: time, data: data, instruction: instruction, renderSize: renderSize)
@@ -392,11 +394,13 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
     }
 
     /// Composites the cursor so its hotspot (top-left fraction) sits on `point`,
-    /// which is in Core Image space (bottom-left origin).
-    private func place(cursor: CIImage, hotspot: CGPoint, size: CGFloat, at point: CGPoint, over frame: CIImage) -> CIImage {
-        let scale = size / max(cursor.extent.width, 1)
-        let tx = point.x - hotspot.x * size
-        let ty = point.y - (1 - hotspot.y) * size
+    /// which is in Core Image space (bottom-left origin). The hotspot stays
+    /// pinned at any scale (shrink click effect).
+    private func place(cursor: CIImage, hotspot: CGPoint, size: CGFloat, at point: CGPoint, over frame: CIImage, scaleMultiplier: CGFloat = 1) -> CIImage {
+        let effectiveSize = size * scaleMultiplier
+        let scale = effectiveSize / max(cursor.extent.width, 1)
+        let tx = point.x - hotspot.x * effectiveSize
+        let ty = point.y - (1 - hotspot.y) * effectiveSize
         return cursor
             .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             .transformed(by: CGAffineTransform(translationX: tx, y: ty))
@@ -459,7 +463,7 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
             case .ring: (startScale, endScale) = (0.35, 2.2)
             case .pulse: (startScale, endScale) = (0.7, 1.0)
             case .ripple: (startScale, endScale) = (0.35, 2.6)
-            case .none: continue
+            case .none, .shrink: continue
             }
             let eased = 1 - pow(1 - progress, 2)
             let diameter = baseRadius * 2 * (startScale + (endScale - startScale) * eased)
@@ -513,7 +517,7 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
             context.setStrokeColor(systemBlue.copy(alpha: 0.9) ?? systemBlue)
             context.setLineWidth(2)
             context.strokeEllipse(in: rect)
-        case .none:
+        case .none, .shrink:
             return nil
         }
 

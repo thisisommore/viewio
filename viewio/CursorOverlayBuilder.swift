@@ -239,7 +239,7 @@ enum CursorOverlayBuilder {
             let begin = AVCoreAnimationBeginTimeAtZero + click.time
 
             switch effect {
-            case .none:
+            case .none, .shrink:
                 break
             case .ripple, .ring:
                 let scale = CABasicAnimation(keyPath: "transform.scale")
@@ -289,7 +289,7 @@ enum CursorOverlayBuilder {
 
     private static func clickStrokeColor(for effect: CursorClickEffect) -> NSColor {
         switch effect {
-        case .none: .clear
+        case .none, .shrink: .clear
         case .ripple: NSColor.systemBlue.withAlphaComponent(0.85)
         case .ring: NSColor.white.withAlphaComponent(0.9)
         case .pulse: NSColor.systemBlue

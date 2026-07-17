@@ -789,6 +789,10 @@ private struct CursorPlayerOverlay: View {
                             .resizable()
                             .interpolation(.high)
                             .frame(width: cursorSize, height: cursorSize)
+                            .scaleEffect(
+                                state.clickScale,
+                                anchor: UnitPoint(x: hotspot.x, y: hotspot.y)
+                            )
                             .opacity(sample.opacity)
                             .shadow(
                                 color: .black.opacity(index == 0 ? 0.2 : 0.06),
@@ -798,7 +802,7 @@ private struct CursorPlayerOverlay: View {
                             .position(center)
                     }
 
-                    if let progress = state.clickProgress, state.clickEffect != .none {
+                    if let progress = state.clickProgress, state.clickEffect != .none, state.clickEffect != .shrink {
                         let tip = tipPoint(normalized: state.normalizedPosition, in: videoRect)
                         ClickOverlayShape(effect: state.clickEffect, progress: progress)
                             .frame(width: cursorSize * 3.2, height: cursorSize * 3.2)
@@ -843,7 +847,7 @@ private struct ClickOverlayShape: View {
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let t = min(1, max(0, progress))
             switch effect {
-            case .none:
+            case .none, .shrink:
                 break
             case .ripple:
                 let radius = 6 + CGFloat(t) * min(size.width, size.height) * 0.42
@@ -2370,16 +2374,20 @@ private struct ClickEffectDemo: View {
             let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.4) / 1.4
             Canvas { context, size in
                 let center = CGPoint(x: size.width / 2, y: size.height / 2)
-                // Cursor dot
-                let cursor = CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)
+                let burst = min(1, max(0, (phase - 0.15) / 0.55))
+                // Cursor dot (dips in size for the shrink effect)
+                let dip: CGFloat = effect == .shrink && burst > 0 && burst < 1
+                    ? CGFloat(sin(burst * .pi))
+                    : 0
+                let dotRadius = 3 * (1 - 0.4 * dip)
+                let cursor = CGRect(x: center.x - dotRadius, y: center.y - dotRadius, width: dotRadius * 2, height: dotRadius * 2)
                 context.fill(Path(ellipseIn: cursor), with: .color(.primary.opacity(0.85)))
 
                 guard effect != .none else { return }
-                let burst = min(1, max(0, (phase - 0.15) / 0.55))
                 guard burst > 0, burst < 1 else { return }
 
                 switch effect {
-                case .none:
+                case .none, .shrink:
                     break
                 case .ripple:
                     let radius = 4 + CGFloat(burst) * 14

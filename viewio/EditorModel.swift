@@ -145,6 +145,8 @@ struct CursorPreviewState: Equatable {
     var size: Double
     /// Pixels per on-screen point of the recording (≈2 on Retina).
     var pointScale: Double
+    /// Cursor scale for the shrink click effect (1 = normal).
+    var clickScale: Double
     var clickEffect: CursorClickEffect
     var clickProgress: Double?
 }
@@ -649,6 +651,7 @@ final class EditorModel: ObservableObject {
             style: cursorSettings.style,
             size: cursorSettings.size,
             pointScale: Double(cursorPointPixelScale(renderSize: renderSize)),
+            clickScale: cursorSettings.clickEffect.shrinkScale(at: time, clickTimes: clickEvents.map(\.time)),
             clickEffect: cursorSettings.clickEffect,
             clickProgress: clickProgress
         )

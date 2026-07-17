@@ -197,6 +197,7 @@ enum CursorClickEffect: String, CaseIterable, Identifiable {
     case ripple
     case ring
     case pulse
+    case shrink
 
     var id: String { rawValue }
 
@@ -206,7 +207,24 @@ enum CursorClickEffect: String, CaseIterable, Identifiable {
         case .ripple: "Ripple"
         case .ring: "Ring"
         case .pulse: "Pulse"
+        case .shrink: "Shrink"
         }
+    }
+}
+
+extension CursorClickEffect {
+    /// Cursor scale multiplier for the shrink effect: dips below 1 right after
+    /// a click and eases back smoothly. Always 1 for other effects/times.
+    func shrinkScale(at time: Double, clickTimes: [Double]) -> Double {
+        guard self == .shrink else { return 1 }
+        let duration = 0.3
+        for clickTime in clickTimes {
+            let progress = (time - clickTime) / duration
+            if progress >= 0, progress <= 1 {
+                return 1 - 0.22 * sin(.pi * progress)
+            }
+        }
+        return 1
     }
 }
 
