@@ -1888,11 +1888,46 @@ private struct BackgroundInspectorPanel: View {
                                 wallpaperManager.selectWallpaper(wallpaper)
                             }
                         }
+                        AddWallpaperCard {
+                            wallpaperManager.addCustomWallpaper()
+                        }
                     }
                 }
                 .frame(maxHeight: 360)
             }
         }
+    }
+}
+
+private struct AddWallpaperCard: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.primary.opacity(0.06))
+
+                    Image(systemName: "plus")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(height: 54)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
+                        .foregroundStyle(Color.primary.opacity(0.25))
+                }
+
+                Text("Custom…")
+                    .font(.system(size: 9, weight: .medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(height: 24)
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 
