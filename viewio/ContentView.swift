@@ -1853,6 +1853,26 @@ private struct BackgroundInspectorPanel: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Padding")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(String(format: "%.1f%%", model.backgroundPadding * 100))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { model.backgroundPadding },
+                            set: model.setBackgroundPadding
+                        ),
+                        in: 0...0.3,
+                        step: 0.005
+                    )
+                }
+
                 if model.captureMode == .window {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {

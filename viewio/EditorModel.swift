@@ -183,6 +183,9 @@ final class EditorModel: ObservableObject {
     @Published private(set) var hasCameraVideo = false
     @Published var isBackgroundEnabled: Bool
     @Published var backgroundCornerRadius: Double
+    /// Fraction of the frame width/height left as background margin on each
+    /// edge when a wallpaper is active (0.025 = video scaled to 95%).
+    @Published var backgroundPadding: Double = 0.025
     /// Pixel size of the composed video frame (for letterboxed cursor overlay).
     @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
     @Published private(set) var timelineThumbnails: [NSImage] = []
@@ -415,6 +418,13 @@ final class EditorModel: ObservableObject {
         let clamped = min(120, max(0, radius))
         guard abs(backgroundCornerRadius - clamped) > 0.001 else { return }
         backgroundCornerRadius = clamped
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setBackgroundPadding(_ padding: Double) {
+        let clamped = min(0.3, max(0, padding))
+        guard abs(backgroundPadding - clamped) > 0.0001 else { return }
+        backgroundPadding = clamped
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -1045,11 +1055,11 @@ final class EditorModel: ObservableObject {
         let includeWallpaper = isBackgroundEnabled && selectedWallpaperURL != nil
         let applyRoundedCorners = isBackgroundEnabled && captureMode == .window
 
-        // When a wallpaper is active, shrink the video slightly and center it so
-        // the background image shows around the edges.
+        // When a wallpaper is active, shrink the video by the padding setting
+        // and center it so the background image shows around the edges.
         let baseTransform: CGAffineTransform
         if includeWallpaper {
-            let placementScale: CGFloat = 0.95
+            let placementScale = CGFloat(1 - 2 * backgroundPadding)
             let orientedWidth = abs(transformedSize.width)
             let orientedHeight = abs(transformedSize.height)
             let offsetX = (renderSize.width - orientedWidth * placementScale) / 2
