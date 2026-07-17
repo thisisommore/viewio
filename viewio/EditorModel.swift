@@ -111,6 +111,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
     case cursor
     case camera
     case background
+    case audio
 
     var id: String { rawValue }
 
@@ -120,6 +121,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
         case .cursor: "Cursor"
         case .camera: "Camera"
         case .background: "Background"
+        case .audio: "Audio"
         }
     }
 
@@ -129,6 +131,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
         case .cursor: "cursorarrow.motionlines"
         case .camera: "camera.fill"
         case .background: "photo.fill"
+        case .audio: "music.note"
         }
     }
 }
@@ -188,6 +191,15 @@ final class EditorModel: ObservableObject {
     /// Fraction of the frame width/height left as background margin on each
     /// edge when a wallpaper is active (0.025 = video scaled to 95%).
     @Published var backgroundPadding: Double = 0.025
+    /// Local music file mixed under the video (nil = none).
+    @Published private(set) var musicURL: URL?
+    @Published private(set) var musicError: String?
+    @Published var musicVolume: Double = 0.8
+    @Published var isOriginalAudioMuted: Bool = false
+    /// Loaded audio track of `musicURL` (kept so composition building stays sync).
+    private var musicSourceTrack: AVAssetTrack?
+    /// TrackID of the music track inside the current composition (for the mix).
+    private var compositionMusicTrackID: CMPersistentTrackID?
     /// Pixel size of the composed video frame (for letterboxed cursor overlay).
     @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
     @Published private(set) var timelineThumbnails: [NSImage] = []
@@ -428,6 +440,79 @@ final class EditorModel: ObservableObject {
         guard abs(backgroundPadding - clamped) > 0.0001 else { return }
         backgroundPadding = clamped
         rebuildPreview(preservingPlayhead: true)
+    }
+
+    // MARK: - Music
+
+    /// Lets the user pick a local audio file to mix under the video.
+    func chooseMusicFile() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Music"
+        panel.message = "Pick an audio file to use as background music."
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        Task {
+            let asset = AVURLAsset(url: url)
+            guard let track = try? await asset.loadTracks(withMediaType: .audio).first else {
+                musicError = "That file doesn't contain an audio track."
+                return
+            }
+            musicSourceTrack = track
+            musicURL = url
+            musicError = nil
+            rebuildPreview(preservingPlayhead: true)
+        }
+    }
+
+    func clearMusic() {
+        guard musicURL != nil else { return }
+        musicURL = nil
+        musicSourceTrack = nil
+        musicError = nil
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    func setMusicVolume(_ volume: Double) {
+        let clamped = min(1, max(0, volume))
+        guard abs(musicVolume - clamped) > 0.001 else { return }
+        musicVolume = clamped
+        refreshAudioMix()
+    }
+
+    func setOriginalAudioMuted(_ muted: Bool) {
+        guard isOriginalAudioMuted != muted else { return }
+        isOriginalAudioMuted = muted
+        refreshAudioMix()
+    }
+
+    /// Re-applies volume settings to the live player item without rebuilding
+    /// the composition (safe for slider drags).
+    private func refreshAudioMix() {
+        guard let item = player.currentItem,
+              let composition = item.asset as? AVMutableComposition else { return }
+        item.audioMix = makeAudioMix(for: composition)
+    }
+
+    /// Volume params for every audio track: music gets `musicVolume`, original
+    /// recording audio is silenced when muted.
+    private func makeAudioMix(for composition: AVMutableComposition) -> AVMutableAudioMix? {
+        let audioTracks = composition.tracks(withMediaType: .audio)
+        guard !audioTracks.isEmpty else { return nil }
+        let parameters = audioTracks.map { track -> AVMutableAudioMixInputParameters in
+            let params = AVMutableAudioMixInputParameters(track: track)
+            if track.trackID == compositionMusicTrackID {
+                params.setVolume(Float(musicVolume), at: .zero)
+            } else if isOriginalAudioMuted {
+                params.setVolume(0, at: .zero)
+            }
+            return params
+        }
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = parameters
+        return mix
     }
 
     func setCameraCorner(_ corner: CameraCorner) {
@@ -910,6 +995,7 @@ final class EditorModel: ObservableObject {
 
         let item = AVPlayerItem(asset: build.composition)
         item.videoComposition = build.videoComposition
+        item.audioMix = makeAudioMix(for: build.composition)
         // Full-quality preview decode (avoid soft low-bitrate streaming defaults).
         item.preferredPeakBitRate = 0
         item.preferredMaximumResolution = CGSize(width: 8192, height: 8192)
@@ -1014,6 +1100,22 @@ final class EditorModel: ObservableObject {
             cursor = cursor + outputDuration
         }
 
+        // Music bed: loop the picked track so it covers the whole composition.
+        compositionMusicTrackID = nil
+        if let musicSourceTrack,
+           let musicTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            let musicDuration = musicSourceTrack.timeRange.duration
+            if musicDuration > .zero {
+                var musicCursor = CMTime.zero
+                while musicCursor < cursor {
+                    let remaining = cursor - musicCursor
+                    let segment = CMTimeRange(start: .zero, duration: CMTimeMinimum(remaining, musicDuration))
+                    try? musicTrack.insertTimeRange(segment, of: musicSourceTrack, at: musicCursor)
+                    musicCursor = musicCursor + segment.duration
+                }
+            }
+            compositionMusicTrackID = musicTrack.trackID
+        }
 
         print("CamDebug composition tracks: screen segments=\(compositionVideoTrack.segments.count), camera segments=\(compositionCameraTrack?.segments.count ?? 0)")
         let videoComposition = makeVideoComposition(
@@ -1529,6 +1631,7 @@ final class EditorModel: ObservableObject {
         session.outputURL = outputURL
         session.outputFileType = .mp4
         session.videoComposition = build.videoComposition
+        session.audioMix = makeAudioMix(for: build.composition)
         session.shouldOptimizeForNetworkUse = true
         exportSession = session
         exportState = .exporting(0)

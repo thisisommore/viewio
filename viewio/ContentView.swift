@@ -892,6 +892,8 @@ private struct ClipInspector: View {
                         CameraInspectorPanel(model: model)
                     case .background:
                         BackgroundInspectorPanel(model: model)
+                    case .audio:
+                        AudioInspectorPanel(model: model)
                     }
                 }
                 .padding(16)
@@ -1926,6 +1928,95 @@ private struct BackgroundInspectorPanel: View {
                 }
                 .frame(maxHeight: 360)
             }
+        }
+    }
+}
+
+private struct AudioInspectorPanel: View {
+    @ObservedObject var model: EditorModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("AUDIO")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.75)
+                    .foregroundStyle(.secondary)
+                Text("Background music")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+
+            if let musicURL = model.musicURL {
+                HStack(spacing: 8) {
+                    Image(systemName: "music.note")
+                        .foregroundStyle(Color.accentColor)
+                    Text(musicURL.deletingPathExtension().lastPathComponent)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Button {
+                        model.clearMusic()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Remove music")
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Music volume")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(Int((model.musicVolume * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { model.musicVolume },
+                            set: model.setMusicVolume
+                        ),
+                        in: 0...1
+                    )
+                }
+
+                Button("Change Music…") {
+                    model.chooseMusicFile()
+                }
+            } else {
+                Text("Add a music track that plays under your video, in the preview and in the export.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Choose Music…") {
+                    model.chooseMusicFile()
+                }
+
+                if let error = model.musicError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Divider()
+
+            Toggle(
+                "Mute original audio",
+                isOn: Binding(
+                    get: { model.isOriginalAudioMuted },
+                    set: model.setOriginalAudioMuted
+                )
+            )
+            .toggleStyle(.switch)
+            .font(.callout)
         }
     }
 }
