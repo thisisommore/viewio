@@ -26,7 +26,10 @@ struct viewioApp: App {
     @FocusedValue(\.exportModel) private var exportModel
 
     var body: some Scene {
-        WindowGroup("viewio") {
+        // Single-window scene: WindowGroup would allow extra windows (⌘N /
+        // Dock menu), and every window shares one RecordingController — which
+        // is why the discard alert appeared on all of them.
+        Window("viewio", id: "main") {
             ContentView()
                 .environmentObject(recorder)
                 .environmentObject(wallpaperManager)
