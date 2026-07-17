@@ -544,6 +544,7 @@ private struct EditorWorkspace: View {
             }
         }
         .navigationTitle(model.clipTitle)
+        .focusedSceneValue(\.exportModel, model)
         .overlay {
             ExportOverlay(state: model.exportState, dismiss: model.dismissExportMessage)
         }

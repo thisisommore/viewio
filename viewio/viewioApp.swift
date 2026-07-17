@@ -7,16 +7,38 @@
 
 import SwiftUI
 
+/// Lets the File menu reach the EditorModel of the currently focused window.
+private struct ExportModelFocusedKey: FocusedValueKey {
+    typealias Value = EditorModel
+}
+
+extension FocusedValues {
+    var exportModel: EditorModel? {
+        get { self[ExportModelFocusedKey.self] }
+        set { self[ExportModelFocusedKey.self] = newValue }
+    }
+}
+
 @main
 struct viewioApp: App {
     @StateObject private var recorder = RecordingController()
     @StateObject private var wallpaperManager = WallpaperManager.shared
+    @FocusedValue(\.exportModel) private var exportModel
 
     var body: some Scene {
         WindowGroup("viewio") {
             ContentView()
                 .environmentObject(recorder)
                 .environmentObject(wallpaperManager)
+        }
+        .commands {
+            CommandGroup(after: .saveItem) {
+                Button("Export…") {
+                    exportModel?.export()
+                }
+                .keyboardShortcut("e")
+                .disabled(exportModel == nil)
+            }
         }
 
         MenuBarExtra(
