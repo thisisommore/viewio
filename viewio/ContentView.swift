@@ -195,90 +195,68 @@ private struct CaptureSourceSection: View {
     let isPreparing: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        Button(action: recorder.presentContentPicker) {
             HStack(spacing: 12) {
-                ForEach(CaptureMode.allCases) { mode in
-                    SourceCard(
-                        title: mode.title,
-                        systemImage: mode == .display ? "display" : "macwindow",
-                        isSelected: recorder.captureMode == mode,
-                        action: { recorder.captureMode = mode }
-                    )
-                }
-            }
-            .disabled(isPreparing)
+                Image(systemName: recorder.captureMode == .window ? "macwindow" : "display")
+                    .font(.system(size: 22))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 28)
 
-            sourcePicker
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(selectionName)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(recorder.captureMode.title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 12)
+
+                Text("Choose…")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.07), in: Capsule())
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 10))
         }
+        .buttonStyle(SourcePickerCardStyle())
+        .disabled(isPreparing)
     }
 
-    @ViewBuilder
-    private var sourcePicker: some View {
+    private var selectionName: String {
         switch recorder.captureMode {
         case .display:
-            Picker("Display", selection: $recorder.selectedDisplayID) {
-                ForEach(recorder.availableDisplays) { display in
-                    Text(display.name).tag(Optional(display.id))
-                }
+            if let display = recorder.availableDisplays.first(where: { $0.id == recorder.selectedDisplayID })
+                ?? recorder.availableDisplays.first {
+                return display.name
             }
-            .disabled(isPreparing)
+            return "Main Display"
         case .window:
-            if recorder.availableWindows.isEmpty {
-                Text("No windows found. Make sure the window you want to record is visible on screen.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .onAppear { recorder.discoverWindows() }
-            } else {
-                Picker("Window", selection: $recorder.selectedWindowID) {
-                    ForEach(recorder.availableWindows) { window in
-                        Text("\(window.appName) — \(window.title)").tag(Optional(window.id))
-                    }
-                }
-                .disabled(isPreparing)
-                .onAppear { recorder.discoverWindows() }
+            if let window = recorder.availableWindows.first(where: { $0.id == recorder.selectedWindowID }) {
+                return "\(window.appName) — \(window.title)"
             }
+            return "No window selected"
         }
     }
 }
 
-private struct SourceCard: View {
-    let title: String
-    let systemImage: String
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 8) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 24))
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 84)
-        }
-        .buttonStyle(SourceCardStyle(isSelected: isSelected))
-    }
-}
-
-private struct SourceCardStyle: ButtonStyle {
-    let isSelected: Bool
-
+private struct SourcePickerCardStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(isSelected ? Color.accentColor : .primary)
             .background {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(isSelected
-                          ? Color.accentColor.opacity(configuration.isPressed ? 0.18 : 0.12)
-                          : Color.primary.opacity(configuration.isPressed ? 0.1 : 0.05))
+                    .fill(Color.primary.opacity(configuration.isPressed ? 0.1 : 0.05))
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(isSelected ? Color.accentColor : Color.primary.opacity(0.1),
-                            lineWidth: isSelected ? 2 : 1)
+                    .stroke(Color.primary.opacity(0.1))
             }
     }
 }

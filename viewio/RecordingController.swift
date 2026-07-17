@@ -242,6 +242,7 @@ final class RecordingController: NSObject, ObservableObject {
         discoverWindows()
         discoverCameras()
         discoverMicrophones()
+        configureContentPicker()
     }
 
     func startRecording() {
@@ -288,6 +289,41 @@ final class RecordingController: NSObject, ObservableObject {
     func dismissError() {
         if case .failed = state {
             state = .idle
+        }
+    }
+
+    /// Presents the native macOS content picker (live display/window thumbnails).
+    /// The choice is mapped back onto `captureMode` + selection IDs in `applyPickedFilter`.
+    func presentContentPicker() {
+        let picker = SCContentSharingPicker.shared
+        // The daemon rejects present() unless the picker is in the active state.
+        picker.isActive = true
+        picker.present()
+    }
+
+    private func configureContentPicker() {
+        let picker = SCContentSharingPicker.shared
+        var configuration = picker.configuration ?? SCContentSharingPickerConfiguration()
+        configuration.allowedPickerModes = [.singleDisplay, .singleWindow]
+        picker.configuration = configuration
+        picker.add(self)
+    }
+
+    /// Maps a filter chosen in the system picker back onto the app's
+    /// display/window selection so the existing capture pipeline is reused.
+    private func applyPickedFilter(_ filter: SCContentFilter) async {
+        guard let content = try? await SCShareableContent.current else { return }
+        switch filter.style {
+        case .window:
+            guard let window = content.windows.first(where: { $0.frame == filter.contentRect }) else { return }
+            captureMode = .window
+            selectedWindowID = window.windowID
+        case .display:
+            guard let display = content.displays.first(where: { $0.frame == filter.contentRect }) else { return }
+            captureMode = .display
+            selectedDisplayID = display.displayID
+        default:
+            break
         }
     }
 
@@ -897,6 +933,25 @@ extension RecordingController: SCStreamDelegate {
             guard self?.isRecording == true else { return }
             self?.finishWithError(error)
         }
+    }
+}
+
+extension RecordingController: SCContentSharingPickerObserver {
+    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
+        Task { @MainActor [weak self] in
+            picker.isActive = false
+            await self?.applyPickedFilter(filter)
+        }
+    }
+
+    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
+        Task { @MainActor in
+            picker.isActive = false
+        }
+    }
+
+    nonisolated func contentSharingPickerStartDidFailWithError(_ error: any Error) {
+        print("Content picker failed to start: \(error.localizedDescription)")
     }
 }
 
