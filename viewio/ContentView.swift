@@ -1168,21 +1168,34 @@ private struct TimelineView: View {
                             )
                             .frame(width: width, height: 48)
                             .offset(x: x, y: 24)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                model.selectClip(layout.clip.id)
-                            }
                         }
 
                         PlayheadView()
                             .frame(height: proxy.size.height)
                             .offset(x: trackWidth * CGFloat(model.playhead / duration))
                     }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                     .contentShape(Rectangle())
+                    // One gesture for the whole lane — no parent/child competition.
+                    // Seeking starts only past a 3pt threshold so a click-press
+                    // doesn't move the playhead; a sub-threshold release is a tap:
+                    // select the clip under it, or seek when tapping empty space.
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
+                                guard abs(value.translation.width) > 3 || abs(value.translation.height) > 3 else { return }
                                 model.seek(to: Double(value.location.x / trackWidth) * duration)
+                            }
+                            .onEnded { value in
+                                guard abs(value.translation.width) <= 3, abs(value.translation.height) <= 3 else { return }
+                                let time = Double(value.location.x / trackWidth) * duration
+                                let inClipBand = value.location.y >= 24 && value.location.y <= 72
+                                if inClipBand,
+                                   let layout = model.timelineClips.first(where: { time >= $0.start && time < $0.end }) {
+                                    model.selectClip(layout.clip.id)
+                                } else {
+                                    model.seek(to: time)
+                                }
                             }
                     )
                     .padding(.trailing, 40)
