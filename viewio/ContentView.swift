@@ -5,6 +5,7 @@
 
 import AppKit
 import AVKit
+@preconcurrency import ScreenCaptureKit
 import SwiftUI
 
 struct ContentView: View {
@@ -123,15 +124,19 @@ private struct RecordingStartView: View {
     /// One-line recap of the current setup shown next to the Start button.
     private var summary: String {
         var parts: [String] = [recorder.captureMode.title]
-        switch recorder.captureMode {
-        case .display:
-            if let display = recorder.availableDisplays.first(where: { $0.id == recorder.selectedDisplayID })
-                ?? recorder.availableDisplays.first {
-                parts.append(display.name)
-            }
-        case .window:
-            if let window = recorder.availableWindows.first(where: { $0.id == recorder.selectedWindowID }) {
-                parts.append(window.appName)
+        if recorder.pickedFilter != nil {
+            parts.append(recorder.pickedContentName ?? "System picker selection")
+        } else {
+            switch recorder.captureMode {
+            case .display:
+                if let display = recorder.availableDisplays.first(where: { $0.id == recorder.selectedDisplayID })
+                    ?? recorder.availableDisplays.first {
+                    parts.append(display.name)
+                }
+            case .window:
+                if let window = recorder.availableWindows.first(where: { $0.id == recorder.selectedWindowID }) {
+                    parts.append(window.appName)
+                }
             }
         }
         parts.append(recorder.selectedResolution.title)
@@ -231,6 +236,10 @@ private struct CaptureSourceSection: View {
     }
 
     private var selectionName: String {
+        if recorder.pickedFilter != nil {
+            return recorder.pickedContentName
+                ?? (recorder.captureMode == .window ? "Selected Window" : "Selected Display")
+        }
         switch recorder.captureMode {
         case .display:
             if let display = recorder.availableDisplays.first(where: { $0.id == recorder.selectedDisplayID })
@@ -415,6 +424,10 @@ private struct RecordingSettingsSection: View {
     }
 
     private var nativeSize: CGSize {
+        if let picked = recorder.pickedFilter {
+            let scale = CGFloat(picked.pointPixelScale)
+            return CGSize(width: picked.contentRect.width * scale, height: picked.contentRect.height * scale)
+        }
         if recorder.captureMode == .window {
             guard let window = recorder.availableWindows.first(where: { $0.id == recorder.selectedWindowID })
                     ?? recorder.availableWindows.first else {

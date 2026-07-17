@@ -206,6 +206,12 @@ final class RecordingController: NSObject, ObservableObject {
     @Published var selectedResolution: RecordingResolution = .native
     @Published var selectedFrameRate: RecordingFrameRate = .fps60
     @Published var cameraCorner: CameraCorner = .bottomRight
+    /// Filter chosen in the native system content picker. When set, recording
+    /// captures exactly this content; the display/window selection below is
+    /// then synced only as a best effort for the UI.
+    @Published private(set) var pickedFilter: SCContentFilter?
+    /// Best-effort display name of the picked content.
+    @Published private(set) var pickedContentName: String?
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -309,22 +315,43 @@ final class RecordingController: NSObject, ObservableObject {
         picker.add(self)
     }
 
-    /// Maps a filter chosen in the system picker back onto the app's
-    /// display/window selection so the existing capture pipeline is reused.
+    /// Records exactly what the user picked in the system picker. The legacy
+    /// display/window selection is synced only as a best effort for the UI.
     private func applyPickedFilter(_ filter: SCContentFilter) async {
-        guard let content = try? await SCShareableContent.current else { return }
+        pickedFilter = filter
+        captureMode = filter.style == .window ? .window : .display
+
+        guard let content = try? await SCShareableContent.current else {
+            pickedContentName = nil
+            return
+        }
         switch filter.style {
         case .window:
-            guard let window = content.windows.first(where: { $0.frame == filter.contentRect }) else { return }
-            captureMode = .window
-            selectedWindowID = window.windowID
+            if let window = content.windows.first(where: { framesMatch($0.frame, filter.contentRect) }) {
+                let appName = window.owningApplication?.applicationName ?? "Unknown"
+                let title = window.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                pickedContentName = title.isEmpty ? appName : "\(appName) — \(title)"
+                selectedWindowID = window.windowID
+            } else {
+                pickedContentName = nil
+            }
         case .display:
-            guard let display = content.displays.first(where: { $0.frame == filter.contentRect }) else { return }
-            captureMode = .display
-            selectedDisplayID = display.displayID
+            if let display = content.displays.first(where: { framesMatch($0.frame, filter.contentRect) }) {
+                pickedContentName = availableDisplays.first(where: { $0.id == display.displayID })?.name
+                selectedDisplayID = display.displayID
+            } else {
+                pickedContentName = nil
+            }
         default:
-            break
+            pickedContentName = nil
         }
+    }
+
+    /// The picker's contentRect can drift from the live frame by a fraction of
+    /// a point, so frames are matched with tolerance instead of exact equality.
+    private func framesMatch(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) < 1 && abs(a.minY - b.minY) < 1
+            && abs(a.width - b.width) < 1 && abs(a.height - b.height) < 1
     }
 
     func discardRecording() {
@@ -349,7 +376,12 @@ final class RecordingController: NSObject, ObservableObject {
         // capture we use the selected display.
         let targetDisplayID: CGDirectDisplayID
         let capturedWindow: SCWindow?
-        if captureMode == .window {
+        if let pickedFilter {
+            // The picker filter is authoritative — bounds come straight from it.
+            capturedWindow = nil
+            captureBounds = cocoaFrame(forWindowFrame: pickedFilter.contentRect)
+            targetDisplayID = displayIDContainingWindow(frameInCGSpace: pickedFilter.contentRect) ?? displays[0].displayID
+        } else if captureMode == .window {
             guard let selectedWindowID,
                   let window = content.windows.first(where: { $0.windowID == selectedWindowID }) else {
                 throw RecordingError.noWindow
@@ -411,7 +443,29 @@ final class RecordingController: NSObject, ObservableObject {
         // the chosen window, so the overlay is naturally omitted.
         let filter: SCContentFilter
         let nativeSize: CGSize
-        if captureMode == .window, let window = capturedWindow {
+        if let pickedFilter {
+            let scale = CGFloat(pickedFilter.pointPixelScale)
+            nativeSize = CGSize(
+                width: pickedFilter.contentRect.width * scale,
+                height: pickedFilter.contentRect.height * scale
+            )
+            // Rebuild display filters so the camera overlay stays excluded;
+            // other filter styles never include it anyway.
+            if pickedFilter.style == .display,
+               let display = content.displays.first(where: { framesMatch($0.frame, pickedFilter.contentRect) }) {
+                let excludedWindows: [SCWindow]
+                if let overlayWindow,
+                   let windowNumber = overlayWindow.windowNumber,
+                   let overlaySCWindow = content.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
+                    excludedWindows = [overlaySCWindow]
+                } else {
+                    excludedWindows = []
+                }
+                filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
+            } else {
+                filter = pickedFilter
+            }
+        } else if captureMode == .window, let window = capturedWindow {
             filter = SCContentFilter(desktopIndependentWindow: window)
             let scale = CGFloat(filter.pointPixelScale)
             let nativeFromFilter = CGSize(
