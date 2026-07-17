@@ -746,19 +746,27 @@ private struct CursorPlayerOverlay: View {
         GeometryReader { geometry in
             let container = geometry.size
             let render = model.videoRenderSize
-            // Prefer the live AVPlayerLayer rect; fall back to aspect-fit math.
-            // AVPlayerLayer.videoRect is in CALayer bottom-left coordinates, but
-            // this overlay is drawn by SwiftUI which uses top-left coordinates.
+            // Prefer the live AVPlayerLayer rect — but only when its aspect
+            // matches the video. The layer lookup can fail (or report before
+            // the item is ready) and return full bounds, which breaks the
+            // cursor mapping; then the aspect-fit fallback is the better rect.
             let videoRect: CGRect = {
-                if playerVideoRect.width > 2, playerVideoRect.height > 2 {
-                    return CGRect(
-                        x: playerVideoRect.minX,
-                        y: container.height - playerVideoRect.maxY,
-                        width: playerVideoRect.width,
-                        height: playerVideoRect.height
-                    )
+                let fitted = letterboxedRect(aspect: render, in: container)
+                guard playerVideoRect.width > 2, playerVideoRect.height > 2 else {
+                    return fitted
                 }
-                return letterboxedRect(aspect: render, in: container)
+                let reported = CGRect(
+                    x: playerVideoRect.minX,
+                    y: container.height - playerVideoRect.maxY,
+                    width: playerVideoRect.width,
+                    height: playerVideoRect.height
+                )
+                let reportedAspect = reported.width / max(1, reported.height)
+                let videoAspect = render.width / max(1, render.height)
+                guard abs(reportedAspect - videoAspect) / videoAspect < 0.02 else {
+                    return fitted
+                }
+                return reported
             }()
 
             if let state = model.cursorPreview(at: model.playhead) {
