@@ -212,6 +212,8 @@ final class RecordingController: NSObject, ObservableObject {
     @Published private(set) var pickedFilter: SCContentFilter?
     /// Best-effort display name of the picked content.
     @Published private(set) var pickedContentName: String?
+    /// Shows the confirmation alert before discarding the current recording.
+    @Published var showsDiscardRecordingConfirmation = false
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -370,11 +372,20 @@ final class RecordingController: NSObject, ObservableObject {
             && abs(a.width - b.width) < 1 && abs(a.height - b.height) < 1
     }
 
+    /// Asks for confirmation before discarding the current recording; the
+    /// alert lives in ContentView and calls `discardRecording()` on confirm.
+    func requestNewRecording() {
+        guard case .finished = state else { return }
+        showsDiscardRecordingConfirmation = true
+    }
+
     func discardRecording() {
         if case let .finished(url) = state {
             try? FileManager.default.removeItem(at: url)
             try? FileManager.default.removeItem(at: cameraSidecarURL(for: url))
             try? FileManager.default.removeItem(at: cameraCornerSidecarURL(for: url))
+            try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("cursor.json"))
+            try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("clicks.json"))
         }
         resetCaptureReferences()
         state = .idle

@@ -32,6 +32,13 @@ struct viewioApp: App {
                 .environmentObject(wallpaperManager)
         }
         .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Recording") {
+                    recorder.requestNewRecording()
+                }
+                .keyboardShortcut("n")
+                .disabled(!isEditingRecording)
+            }
             CommandGroup(after: .saveItem) {
                 Button("Export…") {
                     exportModel?.export()
@@ -70,5 +77,10 @@ struct viewioApp: App {
         case .idle, .stopping, .failed, .finished:
             false
         }
+    }
+
+    private var isEditingRecording: Bool {
+        if case .finished = recorder.state { return true }
+        return false
     }
 }

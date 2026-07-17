@@ -63,6 +63,14 @@ struct ContentView: View {
         .animation(.snappy(duration: 0.28), value: recorder.isRecording)
         .frame(minWidth: 960, minHeight: 650)
         .background(Color(nsColor: .windowBackgroundColor))
+        .alert("Discard This Recording?", isPresented: $recorder.showsDiscardRecordingConfirmation) {
+            Button("Discard Recording", role: .destructive) {
+                recorder.discardRecording()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The recording and any edits you've made will be permanently deleted.")
+        }
     }
 }
 
