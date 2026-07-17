@@ -321,6 +321,22 @@ final class RecordingController: NSObject, ObservableObject {
         pickedFilter = filter
         captureMode = filter.style == .window ? .window : .display
 
+        // The filter's own included content is the only reliable identity —
+        // contentRect can lack the global origin for display picks.
+        if let window = filter.includedWindows.first {
+            let appName = window.owningApplication?.applicationName ?? "Unknown"
+            let title = window.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            pickedContentName = title.isEmpty ? appName : "\(appName) — \(title)"
+            selectedWindowID = window.windowID
+            return
+        }
+        if let display = filter.includedDisplays.first {
+            pickedContentName = availableDisplays.first(where: { $0.id == display.displayID })?.name
+            selectedDisplayID = display.displayID
+            return
+        }
+
+        // Fallback: match live shareable content by frame (best effort, UI only).
         guard let content = try? await SCShareableContent.current else {
             pickedContentName = nil
             return
@@ -450,9 +466,9 @@ final class RecordingController: NSObject, ObservableObject {
                 height: pickedFilter.contentRect.height * scale
             )
             // Rebuild display filters so the camera overlay stays excluded;
-            // other filter styles never include it anyway.
-            if pickedFilter.style == .display,
-               let display = content.displays.first(where: { framesMatch($0.frame, pickedFilter.contentRect) }) {
+            // other filter styles never include it anyway. Identity comes from
+            // the filter's own includedDisplays — never frame matching.
+            if pickedFilter.style == .display, let display = pickedFilter.includedDisplays.first {
                 let excludedWindows: [SCWindow]
                 if let overlayWindow,
                    let windowNumber = overlayWindow.windowNumber,
