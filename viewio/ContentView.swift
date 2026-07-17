@@ -1337,7 +1337,7 @@ private struct ZoomLane: View {
                     .padding(.top, 12)
 
                 GeometryReader { proxy in
-                    let trackWidth = max(1, proxy.size.width - 14)
+                    let trackWidth = max(1, proxy.size.width - 40)
                     let duration = max(0.01, model.duration)
 
                     ZStack(alignment: .leading) {
@@ -1362,7 +1362,7 @@ private struct ZoomLane: View {
                             .offset(x: trackWidth * CGFloat(model.playhead / duration))
                     }
                     .frame(height: 40)
-                    .padding(.trailing, 14)
+                    .padding(.trailing, 40)
                 }
             }
             .padding(.top, 4)
