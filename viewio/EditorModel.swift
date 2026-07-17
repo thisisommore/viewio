@@ -140,6 +140,8 @@ struct CursorPreviewState: Equatable {
     var trail: [CursorTrailSample]
     var style: CursorStyle
     var size: Double
+    /// Pixels per on-screen point of the recording (≈2 on Retina).
+    var pointScale: Double
     var clickEffect: CursorClickEffect
     var clickProgress: Double?
 }
@@ -193,10 +195,10 @@ final class EditorModel: ObservableObject {
 
     private(set) var captureMode: CaptureMode
     private var cursorTrack: [CursorPosition] = []
+    /// Point size of the recorded region (from cursor.json) for cursor scaling.
+    private var cursorCaptureSizePoints: CGSize?
     /// Precise video-space track (no smoothing) — used to draw the cursor on content.
     private var preciseCursorTrack: [CursorPosition] = []
-    /// Optional smoothed track for soft camera follow.
-    private var processedCursorTrack: [CursorPosition] = []
     private var clickEvents: [ClickEvent] = []
     /// Same zoom transforms used by the video composition — cursor overlay must
     /// sample these so tip and content stay locked when zoomed.
@@ -556,6 +558,7 @@ final class EditorModel: ObservableObject {
             trail: trail,
             style: cursorSettings.style,
             size: cursorSettings.size,
+            pointScale: Double(cursorPointPixelScale(renderSize: renderSize)),
             clickEffect: cursorSettings.clickEffect,
             clickProgress: clickProgress
         )
@@ -705,6 +708,7 @@ final class EditorModel: ObservableObject {
             let data = try Data(contentsOf: trackURL)
             // v2+: { version, coordinateSpace, samples } in video top-left space.
             if let file = try? JSONDecoder().decode(CursorTrackFile.self, from: data) {
+                cursorCaptureSizePoints = file.captureSizePoints
                 if file.coordinateSpace == CursorTrackFile.videoTopLeft || file.version >= 2 {
                     return file.samples
                 }
@@ -1108,7 +1112,11 @@ final class EditorModel: ObservableObject {
             print("[Camera] custom compositor transform renderSize=\(renderSize), orientedSize=\(orientedSize), ciFrame=\(ciFrame), transform=\(String(describing: cameraTransform))")
         }
 
-        if includeCamera || zoomBlur > 0.001 || includeWallpaper {
+        // The cursor must go through the custom compositor as well:
+        // AVVideoCompositionCoreAnimationTool is ignored whenever a custom
+        // compositor renders the frames (camera / wallpaper / blur / cursor).
+        let includeCursor = includeCursorOverlay && cursorSettings.isEnabled && hasCursorData
+        if includeCamera || zoomBlur > 0.001 || includeWallpaper || includeCursor {
             // Use the Core-Image compositor so we can draw the wallpaper background
             // and scale the camera overlay ourselves. The hardware layer-instruction
             // path cannot composite a static image background.
@@ -1122,7 +1130,8 @@ final class EditorModel: ObservableObject {
                 cameraTransform: cameraTransform,
                 backgroundImageURL: selectedWallpaperURL,
                 applyRoundedCorners: applyRoundedCorners,
-                cornerRadius: CGFloat(backgroundCornerRadius)
+                cornerRadius: CGFloat(backgroundCornerRadius),
+                cursor: includeCursor ? makeCursorRenderData(renderSize: renderSize) : nil
             )
             videoComposition.instructions = [instruction]
             videoComposition.customVideoCompositorClass = ViewioVideoCompositor.self
@@ -1147,27 +1156,6 @@ final class EditorModel: ObservableObject {
 
             instruction.layerInstructions = layerInstructions
             videoComposition.instructions = [instruction]
-        }
-
-        // AVVideoCompositionCoreAnimationTool is offline-only (export). Using it on
-        // AVPlayerItem crashes with NSInvalidArgumentException.
-        if includeCursorOverlay, cursorSettings.isEnabled, hasCursorData {
-            let clicks = clickEvents
-            CursorOverlayBuilder.apply(
-                to: videoComposition,
-                settings: cursorSettings,
-                motionBlur: motionBlurSettings,
-                processedTrack: processedCursorTrack,
-                clickEvents: clicks,
-                renderSize: renderSize,
-                duration: duration.seconds,
-                displayPosition: { [weak self] time in
-                    guard let self else {
-                        return CGPoint(x: renderSize.width / 2, y: renderSize.height / 2)
-                    }
-                    return self.displayCursorPoint(at: time, renderSize: renderSize)
-                }
-            )
         }
 
         return videoComposition
@@ -1228,10 +1216,29 @@ final class EditorModel: ObservableObject {
     private func refreshProcessedCursorTrack() {
         // Precise: where the system cursor actually was (for drawing on UI).
         preciseCursorTrack = CursorMotion.process(track: cursorTrack, motion: .precise)
-        // Smoothed: softer camera path only (never used for the drawn tip).
-        processedCursorTrack = CursorMotion.process(
-            track: cursorTrack,
-            motion: cursorSettings.motion
+    }
+
+    /// Pixels per on-screen point for the recording (≈2 on Retina), so the
+    /// redrawn cursor matches the real cursor's captured size.
+    private func cursorPointPixelScale(renderSize: CGSize) -> CGFloat {
+        guard let capturePoints = cursorCaptureSizePoints, capturePoints.width > 1 else { return 1 }
+        return renderSize.width / capturePoints.width
+    }
+
+    /// Plain-data cursor description for the compositor's export render.
+    private func makeCursorRenderData(renderSize: CGSize) -> CursorRenderData? {
+        guard cursorSettings.isEnabled, hasCursorData, !preciseCursorTrack.isEmpty,
+              let image = CursorArtwork.cgImage(style: cursorSettings.style) else { return nil }
+        return CursorRenderData(
+            image: image,
+            hotspot: CursorArtwork.hotspot(for: cursorSettings.style),
+            size: 16 * CGFloat(cursorSettings.size) * cursorPointPixelScale(renderSize: renderSize),
+            track: preciseCursorTrack,
+            clickTimes: clickEvents.map(\.time),
+            clickEffect: cursorSettings.clickEffect,
+            trailStrength: motionBlurSettings.cursorStrength,
+            trailLookback: motionBlurSettings.cursorTrailDuration,
+            trailGhosts: max(0, motionBlurSettings.cursorTrailSamples - 1)
         )
     }
 

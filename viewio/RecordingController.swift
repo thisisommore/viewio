@@ -161,6 +161,9 @@ struct CursorTrackFile: Codable, Equatable {
     /// "videoTopLeft" (v2+) or "cocoaBottomLeft" (legacy).
     var coordinateSpace: String
     var samples: [CursorPosition]
+    /// Point size of the captured region on screen, so the redrawn cursor can
+    /// match the real cursor's size (pixels per point = render px / points).
+    var captureSizePoints: CGSize?
 
     static let currentVersion = 2
     static let videoTopLeft = "videoTopLeft"
@@ -835,7 +838,8 @@ final class RecordingController: NSObject, ObservableObject {
             let file = CursorTrackFile(
                 version: CursorTrackFile.currentVersion,
                 coordinateSpace: CursorTrackFile.videoTopLeft,
-                samples: cursorTrack
+                samples: cursorTrack,
+                captureSizePoints: captureBounds.size
             )
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]

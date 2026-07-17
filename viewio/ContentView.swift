@@ -762,7 +762,10 @@ private struct CursorPlayerOverlay: View {
             }()
 
             if let state = model.cursorPreview(at: model.playhead) {
-                let cursorSize = 16 * state.size
+                // Match export: the cursor scales with the video content, so it
+                // stays true to the recorded size at any player size.
+                let contentScale = state.pointScale * videoRect.width / max(1, render.width)
+                let cursorSize = 16 * state.size * contentScale
                 let hotspot = CursorArtwork.hotspot(for: state.style)
                 let cursorImage = CursorArtwork.image(style: state.style, scale: 2)
 
