@@ -1162,6 +1162,11 @@ final class EditorModel: ObservableObject {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
+        // Tag as BT.709 so players interpret the sRGB-space frames consistently
+        // instead of guessing the color space (washed-out playback).
+        videoComposition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+        videoComposition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+        videoComposition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
 
         let selectedWallpaperURL = wallpaperManager.selectedWallpaperID
             .flatMap { wallpaperManager.wallpaper(withID: $0) }

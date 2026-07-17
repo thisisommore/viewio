@@ -553,6 +553,9 @@ final class RecordingController: NSObject, ObservableObject {
         configuration.queueDepth = 8
         // BGRA keeps sharp UI text better than subsampled YUV for screen content.
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        // Capture in sRGB so P3 display content is color-managed at the source
+        // instead of shifting later in the pipeline.
+        configuration.colorSpaceName = CGColorSpace.sRGB
         configuration.scalesToFit = true
         configuration.preservesAspectRatio = true
         // Hide the system cursor in the captured frames so the editor can redraw

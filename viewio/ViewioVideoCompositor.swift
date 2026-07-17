@@ -146,8 +146,14 @@ struct ZoomTransformSample: Sendable {
 // MARK: - Compositor
 
 final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
-    private let renderContext = CIContext(options: [.useSoftwareRenderer: false])
-    private let colorSpace = CGColorSpaceCreateDeviceRGB()
+    /// Fixed sRGB pipeline — rendering in deviceRGB follows the display profile
+    /// (P3 on most Macs) and washes out colors in preview and export.
+    private let outputColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    private let renderContext = CIContext(options: [
+        .useSoftwareRenderer: false,
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+        .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+    ])
 
     var sourcePixelBufferAttributes: [String: any Sendable]? {
         [
@@ -280,7 +286,7 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
                 image,
                 to: outputBuffer,
                 bounds: CGRect(origin: .zero, size: render),
-                colorSpace: colorSpace
+                colorSpace: outputColorSpace
             )
             print("CamDebug compositor rendered frame")
             request.finish(withComposedVideoFrame: outputBuffer)
