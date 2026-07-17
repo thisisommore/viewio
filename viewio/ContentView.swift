@@ -1592,7 +1592,7 @@ private struct CursorInspectorPanel: View {
                             get: { model.cursorSettings.size },
                             set: model.setCursorSize
                         ),
-                        in: 0.6...2.0,
+                        in: 0.6...4.0,
                         step: 0.05
                     )
                     .disabled(!model.cursorSettings.isEnabled)

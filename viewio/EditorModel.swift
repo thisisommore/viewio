@@ -557,7 +557,7 @@ final class EditorModel: ObservableObject {
     }
 
     func setCursorSize(_ size: Double) {
-        let clamped = min(2, max(0.6, size))
+        let clamped = min(4, max(0.6, size))
         guard abs(cursorSettings.size - clamped) > 0.001 else { return }
         var settings = cursorSettings
         settings.size = clamped
