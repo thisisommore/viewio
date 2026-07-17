@@ -288,6 +288,27 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
                 bounds: CGRect(origin: .zero, size: render),
                 colorSpace: outputColorSpace
             )
+            // Tag the frame as sRGB/709 — the export honors the composition's
+            // tags, but the live player reads untagged buffers in the display's
+            // (P3) space, which is what made the preview look washed out.
+            CVBufferSetAttachment(
+                outputBuffer,
+                kCVImageBufferCGColorSpaceKey,
+                outputColorSpace,
+                .shouldPropagate
+            )
+            CVBufferSetAttachment(
+                outputBuffer,
+                kCVImageBufferColorPrimariesKey,
+                kCVImageBufferColorPrimaries_ITU_R_709_2,
+                .shouldPropagate
+            )
+            CVBufferSetAttachment(
+                outputBuffer,
+                kCVImageBufferTransferFunctionKey,
+                kCVImageBufferTransferFunction_ITU_R_709_2,
+                .shouldPropagate
+            )
             print("CamDebug compositor rendered frame")
             request.finish(withComposedVideoFrame: outputBuffer)
         }
