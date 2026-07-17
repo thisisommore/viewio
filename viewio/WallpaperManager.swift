@@ -45,7 +45,17 @@ final class WallpaperManager: ObservableObject {
     }
 
     private func loadWallpapers() {
-        let urls = (bundledWallpaperURLs() + customWallpaperURLs())
+        // Custom images used to be copied into Application Support; they're
+        // session-only now, so clear any leftovers from older versions.
+        if let directory = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("viewio", isDirectory: true)
+            .appendingPathComponent("Wallpapers", isDirectory: true) {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let urls = bundledWallpaperURLs()
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !urls.isEmpty else {
             lastError = "No bundled wallpapers found."
@@ -90,26 +100,8 @@ final class WallpaperManager: ObservableObject {
         } ?? []
     }
 
-    /// Images the user added, persisted in Application Support.
-    private func customWallpaperURLs() -> [URL] {
-        guard let directory = customWallpapersDirectory else { return [] }
-        return (try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil
-        ))?
-        .filter { imageExtensions.contains($0.pathExtension.lowercased()) } ?? []
-    }
-
-    private var customWallpapersDirectory: URL? {
-        FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent("viewio", isDirectory: true)
-            .appendingPathComponent("Wallpapers", isDirectory: true)
-    }
-
-    /// Opens a file picker, copies the chosen image into the wallpaper store,
-    /// and selects it.
+    /// Opens a file picker and adds the chosen image to the wallpaper list.
+    /// Session-only: the file is used in place, never copied or persisted.
     func addCustomWallpaper() {
         let panel = NSOpenPanel()
         panel.title = "Choose a Background Image"
@@ -119,25 +111,13 @@ final class WallpaperManager: ObservableObject {
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
 
-        do {
-            guard let directory = customWallpapersDirectory else { return }
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let destination = directory.appendingPathComponent(sourceURL.lastPathComponent)
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
-            }
-            try FileManager.default.copyItem(at: sourceURL, to: destination)
-
-            let wallpaper = Wallpaper(
-                id: uniqueWallpaperID(for: destination.lastPathComponent),
-                name: destination.deletingPathExtension().lastPathComponent,
-                localURL: destination
-            )
-            wallpapers.append(wallpaper)
-            selectWallpaper(wallpaper)
-        } catch {
-            lastError = "Couldn't add that image: \(error.localizedDescription)"
-        }
+        let wallpaper = Wallpaper(
+            id: uniqueWallpaperID(for: sourceURL.lastPathComponent),
+            name: sourceURL.deletingPathExtension().lastPathComponent,
+            localURL: sourceURL
+        )
+        wallpapers.append(wallpaper)
+        selectWallpaper(wallpaper)
     }
 
     private func uniqueWallpaperID(for filename: String) -> String {

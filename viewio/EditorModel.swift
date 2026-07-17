@@ -240,6 +240,11 @@ final class EditorModel: ObservableObject {
         self.backgroundCornerRadius = 28
         installTimeObserver()
         wallpaperManager.loadWallpapersIfNeeded()
+        // Wallpaper choice is per recording — reset to the default so a
+        // previous recording's selection doesn't leak into this one.
+        if let first = wallpaperManager.wallpapers.first {
+            wallpaperManager.selectWallpaper(first)
+        }
         wallpaperCancellable = wallpaperManager.$selectedWallpaperID
             .dropFirst()
             .receive(on: DispatchQueue.main)
