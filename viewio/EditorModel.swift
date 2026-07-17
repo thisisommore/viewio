@@ -200,6 +200,9 @@ final class EditorModel: ObservableObject {
     @Published var isOriginalAudioMuted: Bool = false
     /// Loaded audio track of `musicURL` (kept so composition building stays sync).
     private var musicSourceTrack: AVAssetTrack?
+    /// The asset must stay alive for its track to remain readable across
+    /// composition rebuilds (zoom, trim, speed changes).
+    private var musicAsset: AVURLAsset?
     /// TrackID of the music track inside the current composition (for the mix).
     private var compositionMusicTrackID: CMPersistentTrackID?
     /// Pixel size of the composed video frame (for letterboxed cursor overlay).
@@ -467,6 +470,7 @@ final class EditorModel: ObservableObject {
                 musicError = "That file doesn't contain an audio track."
                 return
             }
+            musicAsset = asset
             musicSourceTrack = track
             musicURL = url
             musicError = nil
@@ -477,6 +481,7 @@ final class EditorModel: ObservableObject {
     func clearMusic() {
         guard musicURL != nil else { return }
         musicURL = nil
+        musicAsset = nil
         musicSourceTrack = nil
         musicError = nil
         rebuildPreview(preservingPlayhead: true)
