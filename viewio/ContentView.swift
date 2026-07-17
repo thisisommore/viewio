@@ -415,10 +415,14 @@ private struct RecordingSettingsSection: View {
     private var resolutionHint: String {
         let native = nativeSize
         let out = recorder.selectedResolution.outputSize(forNative: native)
-        if out.width > native.width + 1 || out.height > native.height + 1 {
+        let isClamped = recorder.selectedResolution != .native
+            && abs(out.width - native.width) < 1
+            && abs(out.height - native.height) < 1
+            && recorder.selectedResolution.maxSize != nil
+        if isClamped {
             return String(
-                format: "Will capture ≈ %.0f×%.0f (upscaled from %.0f×%.0f).",
-                out.width, out.height, native.width, native.height
+                format: "Source is %.0f×%.0f — this preset can’t go higher, so capture stays at native.",
+                native.width, native.height
             )
         }
         return String(

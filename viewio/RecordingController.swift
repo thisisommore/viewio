@@ -96,8 +96,7 @@ enum RecordingResolution: String, CaseIterable, Identifiable {
     }
 
     /// Scales `native` to fit inside this preset while preserving aspect ratio.
-    /// Larger presets upscale the capture (ScreenCaptureKit renders at the
-    /// configured size), so a small window can be recorded at 4K-ish output.
+    /// Never upscales past the native pixel size.
     func outputSize(forNative native: CGSize) -> CGSize {
         let width = max(2, native.width)
         let height = max(2, native.height)
@@ -105,7 +104,10 @@ enum RecordingResolution: String, CaseIterable, Identifiable {
             return evenSize(CGSize(width: width, height: height))
         }
 
-        let scale = min(maxSize.width / width, maxSize.height / height)
+        let scale = min(
+            1,
+            min(maxSize.width / width, maxSize.height / height)
+        )
         return evenSize(CGSize(width: width * scale, height: height * scale))
     }
 
