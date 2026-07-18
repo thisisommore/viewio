@@ -205,57 +205,70 @@ final class CursorTypingHiderTests: XCTestCase {
         XCTAssertEqual(CursorTypingHider.opacity(at: 5, in: segments), 1)
     }
 
-    func testSingleBurstExtendsByHoldDuration() {
-        let segments = CursorTypingHider.segments(
-            keyTimes: [1.0, 1.2, 1.5],
-            cursorTrack: [],
-            duration: 10
-        )
-        XCTAssertEqual(segments, [CursorHiddenSegment(start: 1.0, end: 1.5 + CursorTypingHider.holdDuration)])
-    }
-
-    func testSeparateBurstsProduceSeparateSegments() {
-        let segments = CursorTypingHider.segments(
-            keyTimes: [1.0, 3.0],
-            cursorTrack: [],
-            duration: 10
-        )
-        XCTAssertEqual(segments, [
-            CursorHiddenSegment(start: 1.0, end: 1.0 + CursorTypingHider.holdDuration),
-            CursorHiddenSegment(start: 3.0, end: 3.0 + CursorTypingHider.holdDuration)
-        ])
-    }
-
-    func testBurstIsClampedToDuration() {
-        let segments = CursorTypingHider.segments(keyTimes: [9.5], cursorTrack: [], duration: 10)
-        XCTAssertEqual(segments, [CursorHiddenSegment(start: 9.5, end: 10)])
-    }
-
-    func testMouseMovementRevealsCursorEarly() {
+    func testKeystrokeHidesUntilMouseMoves() {
         let cursorTrack = track([
             (1.0, 0.5, 0.5),
-            (1.2, 0.5, 0.5),
-            (1.35, 0.53, 0.5) // moved past the reveal distance
+            (1.25, 0.5, 0.5), // baseline once the reveal grace ends
+            (2.0, 0.53, 0.5), // moved past the reveal distance
+            (2.5, 0.53, 0.5)
         ])
         let segments = CursorTypingHider.segments(
-            keyTimes: [1.0, 1.1],
+            keyTimes: [1.0, 1.2],
             cursorTrack: cursorTrack,
             duration: 10
         )
-        XCTAssertEqual(segments, [CursorHiddenSegment(start: 1.0, end: 1.35)])
+        XCTAssertEqual(segments, [CursorHiddenSegment(start: 1.0, end: 2.0)])
     }
 
-    func testStationaryMouseKeepsFullHold() {
+    func testNoMouseMoveStaysHiddenToEnd() {
         let cursorTrack = track([
             (1.0, 0.5, 0.5),
-            (1.5, 0.501, 0.5)
+            (2.0, 0.5, 0.5)
+        ])
+        let segments = CursorTypingHider.segments(
+            keyTimes: [1.0, 1.5],
+            cursorTrack: cursorTrack,
+            duration: 10
+        )
+        XCTAssertEqual(segments, [CursorHiddenSegment(start: 1.0, end: 10)])
+    }
+
+    func testMovementDuringGraceDoesNotReveal() {
+        let cursorTrack = track([
+            (1.0, 0.5, 0.5),
+            (1.1, 0.53, 0.5), // still settling from reaching the keyboard
+            (1.2, 0.53, 0.5), // baseline once the reveal grace ends
+            (2.0, 0.53, 0.5)
         ])
         let segments = CursorTypingHider.segments(
             keyTimes: [1.0],
             cursorTrack: cursorTrack,
             duration: 10
         )
-        XCTAssertEqual(segments, [CursorHiddenSegment(start: 1.0, end: 1.0 + CursorTypingHider.holdDuration)])
+        XCTAssertEqual(segments, [CursorHiddenSegment(start: 1.0, end: 10)])
+    }
+
+    func testNewKeyAfterRevealStartsNewSegment() {
+        let cursorTrack = track([
+            (1.2, 0.5, 0.5),
+            (2.0, 0.53, 0.5), // reveals the first segment
+            (5.2, 0.53, 0.5), // baseline for the second segment
+            (8.0, 0.53, 0.5)
+        ])
+        let segments = CursorTypingHider.segments(
+            keyTimes: [1.0, 5.0],
+            cursorTrack: cursorTrack,
+            duration: 10
+        )
+        XCTAssertEqual(segments, [
+            CursorHiddenSegment(start: 1.0, end: 2.0),
+            CursorHiddenSegment(start: 5.0, end: 10)
+        ])
+    }
+
+    func testKeysOutsideDurationAreIgnored() {
+        let segments = CursorTypingHider.segments(keyTimes: [12.0], cursorTrack: [], duration: 10)
+        XCTAssertTrue(segments.isEmpty)
     }
 
     func testOpacityFadesAtSegmentEdges() {

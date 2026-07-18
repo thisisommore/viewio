@@ -24,8 +24,8 @@ struct CursorSettings: Equatable {
     /// Multiplier on the base cursor size (1 = 100%, max 4 = 400%).
     var size: Double = 4.0
     var clickEffect: CursorClickEffect = .shrink
-    /// Fade the cursor out during typing bursts (uses keystroke times captured
-    /// at record time; moving the mouse brings it back early).
+    /// Hide the cursor on keystrokes; it reappears when the mouse moves
+    /// (uses keystroke times captured at record time).
     var hideWhenTyping: Bool = true
 
     static let `default` = CursorSettings()
@@ -243,58 +243,52 @@ struct CursorHiddenSegment: Equatable, Sendable {
 /// Turns keystroke timestamps into hidden-cursor segments and evaluates the
 /// cursor's visibility over time. Pure functions shared by the live preview
 /// and the export compositor so both agree frame-for-frame.
+///
+/// Triggers: a keystroke hides the cursor; it stays hidden until the mouse
+/// actually moves — there is no idle timeout.
 enum CursorTypingHider {
-    /// The cursor stays hidden this long after the last keystroke in a burst.
-    static let holdDuration = 0.9
-    /// Fade-out before a segment starts / fade-in after it ends.
+    /// Fade-out when hiding / fade-in when revealed.
     static let fadeDuration = 0.15
+    /// Movement right after the first keystroke is usually the mouse settling
+    /// from reaching for the keyboard — it must not reveal the cursor. The
+    /// reveal baseline is the cursor position when this grace period ends.
+    static let revealGrace = 0.2
     /// Normalized distance (fraction of frame) the cursor must travel from the
-    /// burst start to reveal itself early — grabbing the mouse mid-burst.
+    /// baseline to count as "the user grabbed the mouse".
     static let revealDistance = 0.01
 
-    /// Burst = consecutive keystrokes with gaps smaller than `holdDuration`.
-    /// A segment runs from the first keystroke to `holdDuration` after the
-    /// last one, cut short if the mouse moves away from where typing began.
+    /// A keystroke that lands while already hidden does nothing; the first
+    /// keystroke after the cursor was revealed starts a new segment. A segment
+    /// ends at the first real mouse move after `revealGrace`, or at the end of
+    /// the video if the mouse never moves again.
     static func segments(
         keyTimes: [Double],
         cursorTrack: [CursorPosition],
         duration: Double
     ) -> [CursorHiddenSegment] {
         let keys = keyTimes.filter { $0 >= 0 && $0 <= duration }.sorted()
-        guard let first = keys.first else { return [] }
-
-        var bursts: [CursorHiddenSegment] = []
-        var burstStart = first
-        var lastKey = first
-        for key in keys.dropFirst() {
-            if key - lastKey > holdDuration {
-                bursts.append(CursorHiddenSegment(start: burstStart, end: min(duration, lastKey + holdDuration)))
-                burstStart = key
-            }
-            lastKey = key
+        var segments: [CursorHiddenSegment] = []
+        for key in keys {
+            if let last = segments.last, key <= last.end { continue }
+            let end = revealTime(after: key, cursorTrack: cursorTrack) ?? duration
+            guard end > key else { continue }
+            segments.append(CursorHiddenSegment(start: key, end: end))
         }
-        bursts.append(CursorHiddenSegment(start: burstStart, end: min(duration, lastKey + holdDuration)))
-
-        for index in bursts.indices {
-            if let reveal = revealTime(in: bursts[index], cursorTrack: cursorTrack) {
-                bursts[index].end = max(bursts[index].start, reveal)
-            }
-        }
-        return bursts.filter { $0.end > $0.start }
+        return segments
     }
 
-    /// First track sample that moved far enough from the burst origin to count
-    /// as the user reaching for the mouse.
+    /// First track sample after the grace period that moved far enough from
+    /// the post-grace baseline to count as a deliberate mouse move.
     private static func revealTime(
-        in segment: CursorHiddenSegment,
+        after start: Double,
         cursorTrack: [CursorPosition]
     ) -> Double? {
-        guard let originSample = cursorTrack.first(where: { $0.time >= segment.start }) else {
+        guard let baseline = cursorTrack.first(where: { $0.time >= start + revealGrace }) else {
             return nil
         }
-        for sample in cursorTrack where sample.time > originSample.time && sample.time <= segment.end {
-            let dx = sample.x - originSample.x
-            let dy = sample.y - originSample.y
+        for sample in cursorTrack where sample.time > baseline.time {
+            let dx = sample.x - baseline.x
+            let dy = sample.y - baseline.y
             if (dx * dx + dy * dy).squareRoot() > revealDistance {
                 return sample.time
             }

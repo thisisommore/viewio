@@ -245,6 +245,10 @@ final class RecordingController: NSObject, ObservableObject {
     /// Global Cocoa bounds (points, origin bottom-left) of the captured display.
     private var captureBounds: CGRect = .zero
     private var wasLeftButtonDown = false
+    /// Live Accessibility trust state, refreshed so the start page can warn
+    /// that typing detection ("hide cursor while typing") won't capture keys.
+    @Published private(set) var isAccessibilityTrusted = AXIsProcessTrusted()
+    private var accessibilityTimer: Timer?
     /// Host time when capture is considered started (aligns cursor track to video).
     private var recordingHostStart: TimeInterval?
     /// When set, stop/finish callbacks delete partial files and return to idle.
@@ -268,6 +272,32 @@ final class RecordingController: NSObject, ObservableObject {
         discoverCameras()
         discoverMicrophones()
         configureContentPicker()
+        if !AXIsProcessTrusted() {
+            // Registers the app in System Settings → Accessibility so the
+            // toggle exists to flip (the system prompt is shown at most once;
+            // later calls are silent no-ops while untrusted).
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
+        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshAccessibilityTrust()
+            }
+        }
+    }
+
+    private func refreshAccessibilityTrust() {
+        let trusted = AXIsProcessTrusted()
+        guard trusted != isAccessibilityTrusted else { return }
+        isAccessibilityTrusted = trusted
+    }
+
+    /// Asks the system for Accessibility access. macOS shows its own modal
+    /// (with an "Open System Settings" shortcut) — no need to open the pane.
+    func requestAccessibilityAccess() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        isAccessibilityTrusted = AXIsProcessTrusted()
     }
 
     func startRecording() {
@@ -911,9 +941,9 @@ final class RecordingController: NSObject, ObservableObject {
         }
         // Keystroke times feed the editor's "hide cursor when typing" option.
         // Global key monitors only fire when the app is trusted for
-        // Accessibility — ask once; if denied, this recording just has no
-        // typing data (only timestamps are captured, never key identities).
-        requestAccessibilityPermissionOnce()
+        // Accessibility — without it this recording just has no typing data
+        // (only timestamps are captured, never key identities). The start
+        // page surfaces the missing permission with a request button.
         keyEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.recordKeyEvent(event)
@@ -921,15 +951,6 @@ final class RecordingController: NSObject, ObservableObject {
         }
         // Immediate sample at t≈0 so the first frame is aligned.
         sampleCursor(bounds: bounds)
-    }
-
-    private func requestAccessibilityPermissionOnce() {
-        guard !AXIsProcessTrusted() else { return }
-        let promptedKey = "didPromptForAccessibility"
-        guard !UserDefaults.standard.bool(forKey: promptedKey) else { return }
-        UserDefaults.standard.set(true, forKey: promptedKey)
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
     }
 
     private func sampleCursor(bounds: CGRect) {
@@ -998,6 +1019,9 @@ final class RecordingController: NSObject, ObservableObject {
         clickEvents.append(ClickEvent(time: time, button: 0))
     }
 
+    /// Keystroke times from the global key monitor (Accessibility only) feed
+    /// the editor's "hide cursor when typing" option. Only the timestamp is
+    /// stored — never which key was pressed.
     private func recordKeyEvent(_ event: NSEvent) {
         guard let hostStart = recordingHostStart else { return }
         let time = max(0, event.timestamp - hostStart)
@@ -1049,7 +1073,8 @@ final class RecordingController: NSObject, ObservableObject {
         guard !keyEvents.isEmpty else { return }
         let keysURL = videoURL.deletingPathExtension().appendingPathExtension("keys.json")
         do {
-            let data = try JSONEncoder().encode(keyEvents)
+            // Monitor callbacks can arrive slightly out of order.
+            let data = try JSONEncoder().encode(keyEvents.sorted { $0.time < $1.time })
             try data.write(to: keysURL)
         } catch {
             print("Failed to save key events: \(error)")

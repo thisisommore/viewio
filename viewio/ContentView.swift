@@ -95,6 +95,10 @@ private struct RecordingStartView: View {
                         errorBanner(message: errorMessage)
                     }
 
+                    if !recorder.isAccessibilityTrusted {
+                        accessibilityBanner
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
                         Text("New Recording")
                             .font(.title2.bold())
@@ -183,6 +187,31 @@ private struct RecordingStartView: View {
             Button("Dismiss") {
                 onDismissError?()
             }
+        }
+        .font(.callout)
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.primary.opacity(0.15))
+        }
+    }
+
+    /// Warns that keystroke capture (for "hide cursor while typing") is off.
+    /// Optional permission — recording itself works without it.
+    private var accessibilityBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "keyboard")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Accessibility access is off")
+                Text("Needed to detect typing for the “hide cursor while typing” effect. Optional — recording works without it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button("Enable Accessibility…", action: recorder.requestAccessibilityAccess)
         }
         .font(.callout)
         .padding(14)
@@ -2021,10 +2050,24 @@ private struct CursorInspectorPanel: View {
                     .disabled(!model.cursorSettings.isEnabled || !model.hasKeyData)
                 }
                 if !model.hasKeyData {
-                    Text("No typing data in this recording. New recordings capture keystroke times (requires Accessibility access).")
+                    Text("No typing data in this recording. New recordings capture keystrokes when Accessibility access is granted.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !AXIsProcessTrusted() {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Typing detection needs Accessibility access to capture keystrokes for “hide while typing” — optional, everything else works without it.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Enable Accessibility…") {
+                            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                            _ = AXIsProcessTrustedWithOptions(options)
+                        }
+                        .controlSize(.small)
+                    }
                 }
 
                 motionBlurSection
