@@ -236,6 +236,8 @@ struct CursorPreviewState: Equatable {
     var clickScale: Double
     var clickEffect: CursorClickEffect
     var clickProgress: Double?
+    /// 1 normally; fades to 0 while "hide when typing" hides the cursor.
+    var typingOpacity: Double = 1
 }
 
 struct CursorTrailSample: Equatable {
@@ -273,6 +275,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var cursorSettings: CursorSettings = .default
     @Published private(set) var motionBlurSettings: MotionBlurSettings = .default
     @Published private(set) var hasCursorData = false
+    @Published private(set) var hasKeyData = false
     @Published private(set) var cameraSettings: CameraSettings = .default
     @Published private(set) var hasCameraVideo = false
     @Published var isBackgroundEnabled: Bool
@@ -308,6 +311,8 @@ final class EditorModel: ObservableObject {
     private var sourceCursorTrack: [CursorPosition] = []
     /// Original recording-space click times (never mutated by edits).
     private var sourceClickEvents: [ClickEvent] = []
+    /// Original recording-space keystroke times (never mutated by edits).
+    private var sourceKeyEvents: [KeyEvent] = []
     /// Cursor samples remapped onto the current composition (output) timeline.
     private var cursorTrack: [CursorPosition] = []
     /// Point size of the recorded region (from cursor.json) for cursor scaling.
@@ -316,6 +321,10 @@ final class EditorModel: ObservableObject {
     private var preciseCursorTrack: [CursorPosition] = []
     /// Click events remapped onto the current composition timeline.
     private var clickEvents: [ClickEvent] = []
+    /// Keystroke times remapped onto the current composition timeline.
+    private var keyEventTimes: [Double] = []
+    /// Ranges where "hide when typing" hides the cursor (composition timeline).
+    private var typingHiddenSegments: [CursorHiddenSegment] = []
     /// Same zoom transforms used by the video composition — cursor overlay must
     /// sample these so tip and content stay locked when zoomed.
     private var zoomTransformSamples: [ZoomTransformSample] = []
@@ -813,6 +822,14 @@ final class EditorModel: ObservableObject {
         cursorSettings = settings
     }
 
+    func setCursorHideWhenTyping(_ enabled: Bool) {
+        guard cursorSettings.hideWhenTyping != enabled else { return }
+        var settings = cursorSettings
+        settings.hideWhenTyping = enabled
+        cursorSettings = settings
+        // Preview reads segments live; export passes them via CursorRenderData.
+    }
+
     func setMotionBlurEnabled(_ enabled: Bool) {
         guard motionBlurSettings.isEnabled != enabled else { return }
         var settings = motionBlurSettings
@@ -893,8 +910,15 @@ final class EditorModel: ObservableObject {
             pointScale: Double(cursorPointPixelScale(renderSize: renderSize)),
             clickScale: cursorSettings.clickEffect.shrinkScale(at: time, clickTimes: clickEvents.map(\.time)),
             clickEffect: cursorSettings.clickEffect,
-            clickProgress: clickProgress
+            clickProgress: clickProgress,
+            typingOpacity: cursorTypingOpacity(at: time)
         )
+    }
+
+    /// Visibility multiplier from "hide when typing" (1 when the option is off).
+    private func cursorTypingOpacity(at time: Double) -> Double {
+        guard cursorSettings.hideWhenTyping, !typingHiddenSegments.isEmpty else { return 1 }
+        return CursorTypingHider.opacity(at: time, in: typingHiddenSegments)
     }
 
     func generateAutoZoomRanges() {
@@ -1073,6 +1097,18 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    private func loadKeyEvents() -> [KeyEvent] {
+        let keysURL = sourceURL.deletingPathExtension().appendingPathExtension("keys.json")
+        guard FileManager.default.fileExists(atPath: keysURL.path) else { return [] }
+        do {
+            let data = try Data(contentsOf: keysURL)
+            return try JSONDecoder().decode([KeyEvent].self, from: data)
+        } catch {
+            print("Failed to load key events: \(error)")
+            return []
+        }
+    }
+
     /// Estimates the window corner radius by scanning diagonally from each corner
     /// of the first video frame for the transition from black to non-black pixels.
     private func detectWindowCornerRadius(asset: AVURLAsset) async -> Double? {
@@ -1167,7 +1203,9 @@ final class EditorModel: ObservableObject {
             sourceAudioTracks = audioTracks
             sourceCursorTrack = loadCursorTrack()
             sourceClickEvents = loadClickEvents()
+            sourceKeyEvents = loadKeyEvents()
             hasCursorData = !sourceCursorTrack.isEmpty
+            hasKeyData = !sourceKeyEvents.isEmpty
             // Default custom cursor on when we have track data (system cursor is hidden on record).
             var settings = cursorSettings
             settings.isEnabled = hasCursorData
@@ -1609,17 +1647,22 @@ final class EditorModel: ObservableObject {
     /// deleted section are dropped; later samples shift earlier so playhead
     /// time matches the edited video (including speed changes).
     private func rebuildTimelineCursorData() {
-        guard !sourceCursorTrack.isEmpty || !sourceClickEvents.isEmpty, !clips.isEmpty else {
+        guard !sourceCursorTrack.isEmpty || !sourceClickEvents.isEmpty || !sourceKeyEvents.isEmpty,
+              !clips.isEmpty else {
             cursorTrack = []
             clickEvents = []
+            keyEventTimes = []
+            typingHiddenSegments = []
             preciseCursorTrack = []
             return
         }
 
         var mappedTrack: [CursorPosition] = []
         var mappedClicks: [ClickEvent] = []
+        var mappedKeys: [Double] = []
         mappedTrack.reserveCapacity(sourceCursorTrack.count)
         mappedClicks.reserveCapacity(sourceClickEvents.count)
+        mappedKeys.reserveCapacity(sourceKeyEvents.count)
 
         var outputTime = 0.0
         for (clipIndex, clip) in clips.enumerated() {
@@ -1646,14 +1689,33 @@ final class EditorModel: ObservableObject {
                 mappedClicks.append(ClickEvent(time: mappedTime, button: click.button))
             }
 
+            for key in sourceKeyEvents {
+                guard sourceTime(key.time, isIn: sourceStart, sourceEnd, includeEnd: isLast) else {
+                    continue
+                }
+                mappedKeys.append(outputTime + (key.time - sourceStart) / speed)
+            }
+
             outputTime += clip.outputDuration
         }
 
         mappedTrack.sort { $0.time < $1.time }
         mappedClicks.sort { $0.time < $1.time }
+        mappedKeys.sort()
         cursorTrack = mappedTrack
         clickEvents = mappedClicks
+        keyEventTimes = mappedKeys
         refreshProcessedCursorTrack()
+        refreshTypingHiddenSegments()
+    }
+
+    private func refreshTypingHiddenSegments() {
+        let totalDuration = clips.reduce(0) { $0 + $1.outputDuration }
+        typingHiddenSegments = CursorTypingHider.segments(
+            keyTimes: keyEventTimes,
+            cursorTrack: cursorTrack,
+            duration: totalDuration
+        )
     }
 
     /// Inclusive start; end is exclusive for mid clips so a cut boundary sample
@@ -1691,7 +1753,8 @@ final class EditorModel: ObservableObject {
             clickEffect: cursorSettings.clickEffect,
             trailStrength: motionBlurSettings.cursorStrength,
             trailLookback: motionBlurSettings.cursorTrailDuration,
-            trailGhosts: max(0, motionBlurSettings.cursorTrailSamples - 1)
+            trailGhosts: max(0, motionBlurSettings.cursorTrailSamples - 1),
+            hiddenSegments: cursorSettings.hideWhenTyping ? typingHiddenSegments : []
         )
     }
 

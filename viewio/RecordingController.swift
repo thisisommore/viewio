@@ -175,6 +175,12 @@ struct ClickEvent: Codable, Equatable {
     let button: Int
 }
 
+/// Keystroke timestamp captured during recording, used by the editor's
+/// "hide cursor when typing" option. Only the time is stored — never the key.
+struct KeyEvent: Codable, Equatable {
+    let time: TimeInterval
+}
+
 @MainActor
 final class RecordingController: NSObject, ObservableObject {
     enum State: Equatable {
@@ -231,8 +237,10 @@ final class RecordingController: NSObject, ObservableObject {
     private var timer: Timer?
     private var cursorTimer: Timer?
     private var cursorEventMonitor: Any?
+    private var keyEventMonitor: Any?
     private var cursorTrack: [CursorPosition] = []
     private var clickEvents: [ClickEvent] = []
+    private var keyEvents: [KeyEvent] = []
     private var recordedDisplayID: CGDirectDisplayID?
     /// Global Cocoa bounds (points, origin bottom-left) of the captured display.
     private var captureBounds: CGRect = .zero
@@ -489,6 +497,7 @@ final class RecordingController: NSObject, ObservableObject {
         try? FileManager.default.removeItem(at: cameraCornerSidecarURL(for: url))
         try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("cursor.json"))
         try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("clicks.json"))
+        try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("keys.json"))
     }
 
     private func configureAndStartCapture() async throws {
@@ -829,6 +838,7 @@ final class RecordingController: NSObject, ObservableObject {
         }
 
         saveCursorTrack(for: outputURL)
+        saveKeyEvents(for: outputURL)
         saveCameraCorner(for: outputURL)
         resetCaptureReferences(keepingOutputURL: true)
         state = .finished(outputURL)
@@ -869,6 +879,7 @@ final class RecordingController: NSObject, ObservableObject {
         stopCursorTracking()
         cursorTrack = []
         clickEvents = []
+        keyEvents = []
         wasLeftButtonDown = false
         guard recordedDisplayID != nil, captureBounds.width > 1, captureBounds.height > 1 else { return }
         let bounds = captureBounds
@@ -898,8 +909,27 @@ final class RecordingController: NSObject, ObservableObject {
                 self?.recordCursorEvent(event, bounds: bounds)
             }
         }
+        // Keystroke times feed the editor's "hide cursor when typing" option.
+        // Global key monitors only fire when the app is trusted for
+        // Accessibility — ask once; if denied, this recording just has no
+        // typing data (only timestamps are captured, never key identities).
+        requestAccessibilityPermissionOnce()
+        keyEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.recordKeyEvent(event)
+            }
+        }
         // Immediate sample at t≈0 so the first frame is aligned.
         sampleCursor(bounds: bounds)
+    }
+
+    private func requestAccessibilityPermissionOnce() {
+        guard !AXIsProcessTrusted() else { return }
+        let promptedKey = "didPromptForAccessibility"
+        guard !UserDefaults.standard.bool(forKey: promptedKey) else { return }
+        UserDefaults.standard.set(true, forKey: promptedKey)
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
     }
 
     private func sampleCursor(bounds: CGRect) {
@@ -968,12 +998,22 @@ final class RecordingController: NSObject, ObservableObject {
         clickEvents.append(ClickEvent(time: time, button: 0))
     }
 
+    private func recordKeyEvent(_ event: NSEvent) {
+        guard let hostStart = recordingHostStart else { return }
+        let time = max(0, event.timestamp - hostStart)
+        keyEvents.append(KeyEvent(time: time))
+    }
+
     private func stopCursorTracking() {
         cursorTimer?.invalidate()
         cursorTimer = nil
         if let cursorEventMonitor {
             NSEvent.removeMonitor(cursorEventMonitor)
             self.cursorEventMonitor = nil
+        }
+        if let keyEventMonitor {
+            NSEvent.removeMonitor(keyEventMonitor)
+            self.keyEventMonitor = nil
         }
     }
 
@@ -1005,6 +1045,17 @@ final class RecordingController: NSObject, ObservableObject {
         }
     }
 
+    private func saveKeyEvents(for videoURL: URL) {
+        guard !keyEvents.isEmpty else { return }
+        let keysURL = videoURL.deletingPathExtension().appendingPathExtension("keys.json")
+        do {
+            let data = try JSONEncoder().encode(keyEvents)
+            try data.write(to: keysURL)
+        } catch {
+            print("Failed to save key events: \(error)")
+        }
+    }
+
     private func resetCaptureReferences(keepingOutputURL: Bool = false) {
         stream = nil
         recordingOutput = nil
@@ -1013,6 +1064,7 @@ final class RecordingController: NSObject, ObservableObject {
         elapsed = 0
         cursorTrack = []
         clickEvents = []
+        keyEvents = []
         recordedDisplayID = nil
         captureBounds = .zero
         wasLeftButtonDown = false

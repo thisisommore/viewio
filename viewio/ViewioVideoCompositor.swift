@@ -31,6 +31,8 @@ struct CursorRenderData {
     let trailLookback: Double
     /// Ghost copies behind the live head.
     let trailGhosts: Int
+    /// "Hide when typing" ranges on the composition timeline (empty = always visible).
+    let hiddenSegments: [CursorHiddenSegment]
 }
 
 /// Carries per-frame zoom + motion-blur parameters into the compositor.
@@ -392,13 +394,18 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
         let cursor = CIImage(cgImage: data.image)
         var result = frame
 
+        // "Hide when typing" fades the cursor (head + trail) to zero; click
+        // rings still draw so a clicked target stays visible.
+        let visibility = CursorTypingHider.opacity(at: time, in: data.hiddenSegments)
+
         // Ghost trail behind the live head (same timing as the old CA tool).
         if data.trailGhosts > 0 {
             for index in 1...data.trailGhosts {
                 let fraction = Double(index) / Double(data.trailGhosts)
-                let opacity = data.trailStrength * 0.55 * (1 - fraction)
-                guard opacity > 0.02 else { continue }
                 let ghostTime = max(0, time - data.trailLookback * fraction)
+                let opacity = data.trailStrength * 0.55 * (1 - fraction)
+                    * CursorTypingHider.opacity(at: ghostTime, in: data.hiddenSegments)
+                guard opacity > 0.02 else { continue }
                 let point = cursorFramePoint(at: ghostTime, data: data, instruction: instruction, renderSize: renderSize)
                 let ghost = cursor.applyingFilter("CIColorMatrix", parameters: [
                     "inputAVector": CIVector(x: 0, y: 0, z: 0, w: CGFloat(opacity))
@@ -409,9 +416,16 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
         }
 
         // Live head — the hotspot lands exactly on the tracked point.
-        let headPoint = cursorFramePoint(at: time, data: data, instruction: instruction, renderSize: renderSize)
-        let headScale = data.clickEffect.shrinkScale(at: time, clickTimes: data.clickTimes)
-        result = place(cursor: cursor, hotspot: data.hotspot, size: data.size, at: headPoint, over: result, scaleMultiplier: headScale)
+        if visibility > 0.01 {
+            let headPoint = cursorFramePoint(at: time, data: data, instruction: instruction, renderSize: renderSize)
+            let headScale = data.clickEffect.shrinkScale(at: time, clickTimes: data.clickTimes)
+            let head = visibility < 0.99
+                ? cursor.applyingFilter("CIColorMatrix", parameters: [
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: CGFloat(visibility))
+                ])
+                : cursor
+            result = place(cursor: head, hotspot: data.hotspot, size: data.size, at: headPoint, over: result, scaleMultiplier: headScale)
+        }
 
         if data.clickEffect != .none {
             result = drawClickEffects(over: result, at: time, data: data, instruction: instruction, renderSize: renderSize)

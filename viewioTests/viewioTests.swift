@@ -193,3 +193,78 @@ private enum TestError: Error {
     case timedOut
     case couldNotCreateFixture
 }
+
+final class CursorTypingHiderTests: XCTestCase {
+    private func track(_ samples: [(Double, Double, Double)]) -> [CursorPosition] {
+        samples.map { CursorPosition(time: $0.0, x: $0.1, y: $0.2) }
+    }
+
+    func testNoKeysProducesNoSegments() {
+        let segments = CursorTypingHider.segments(keyTimes: [], cursorTrack: [], duration: 10)
+        XCTAssertTrue(segments.isEmpty)
+        XCTAssertEqual(CursorTypingHider.opacity(at: 5, in: segments), 1)
+    }
+
+    func testSingleBurstExtendsByHoldDuration() {
+        let segments = CursorTypingHider.segments(
+            keyTimes: [1.0, 1.2, 1.5],
+            cursorTrack: [],
+            duration: 10
+        )
+        XCTAssertEqual(segments, [CursorHiddenSegment(start: 1.0, end: 1.5 + CursorTypingHider.holdDuration)])
+    }
+
+    func testSeparateBurstsProduceSeparateSegments() {
+        let segments = CursorTypingHider.segments(
+            keyTimes: [1.0, 3.0],
+            cursorTrack: [],
+            duration: 10
+        )
+        XCTAssertEqual(segments, [
+            CursorHiddenSegment(start: 1.0, end: 1.0 + CursorTypingHider.holdDuration),
+            CursorHiddenSegment(start: 3.0, end: 3.0 + CursorTypingHider.holdDuration)
+        ])
+    }
+
+    func testBurstIsClampedToDuration() {
+        let segments = CursorTypingHider.segments(keyTimes: [9.5], cursorTrack: [], duration: 10)
+        XCTAssertEqual(segments, [CursorHiddenSegment(start: 9.5, end: 10)])
+    }
+
+    func testMouseMovementRevealsCursorEarly() {
+        let cursorTrack = track([
+            (1.0, 0.5, 0.5),
+            (1.2, 0.5, 0.5),
+            (1.35, 0.53, 0.5) // moved past the reveal distance
+        ])
+        let segments = CursorTypingHider.segments(
+            keyTimes: [1.0, 1.1],
+            cursorTrack: cursorTrack,
+            duration: 10
+        )
+        XCTAssertEqual(segments, [CursorHiddenSegment(start: 1.0, end: 1.35)])
+    }
+
+    func testStationaryMouseKeepsFullHold() {
+        let cursorTrack = track([
+            (1.0, 0.5, 0.5),
+            (1.5, 0.501, 0.5)
+        ])
+        let segments = CursorTypingHider.segments(
+            keyTimes: [1.0],
+            cursorTrack: cursorTrack,
+            duration: 10
+        )
+        XCTAssertEqual(segments, [CursorHiddenSegment(start: 1.0, end: 1.0 + CursorTypingHider.holdDuration)])
+    }
+
+    func testOpacityFadesAtSegmentEdges() {
+        let fade = CursorTypingHider.fadeDuration
+        let segments = [CursorHiddenSegment(start: 1.0, end: 2.0)]
+        XCTAssertEqual(CursorTypingHider.opacity(at: 1.0 - fade - 0.01, in: segments), 1)
+        XCTAssertEqual(CursorTypingHider.opacity(at: 1.0 - fade / 2, in: segments), 0.5, accuracy: 0.001)
+        XCTAssertEqual(CursorTypingHider.opacity(at: 1.5, in: segments), 0)
+        XCTAssertEqual(CursorTypingHider.opacity(at: 2.0 + fade / 2, in: segments), 0.5, accuracy: 0.001)
+        XCTAssertEqual(CursorTypingHider.opacity(at: 2.0 + fade + 0.01, in: segments), 1)
+    }
+}

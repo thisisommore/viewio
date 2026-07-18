@@ -24,6 +24,9 @@ struct CursorSettings: Equatable {
     /// Multiplier on the base cursor size (1 = 100%, max 4 = 400%).
     var size: Double = 4.0
     var clickEffect: CursorClickEffect = .shrink
+    /// Fade the cursor out during typing bursts (uses keystroke times captured
+    /// at record time; moving the mouse brings it back early).
+    var hideWhenTyping: Bool = true
 
     static let `default` = CursorSettings()
 }
@@ -224,6 +227,94 @@ extension CursorClickEffect {
             if progress >= 0, progress <= 1 {
                 return 1 - 0.22 * sin(.pi * progress)
             }
+        }
+        return 1
+    }
+}
+
+// MARK: - Hide when typing
+
+/// A time range (seconds on the composition timeline) where the cursor is hidden.
+struct CursorHiddenSegment: Equatable, Sendable {
+    var start: Double
+    var end: Double
+}
+
+/// Turns keystroke timestamps into hidden-cursor segments and evaluates the
+/// cursor's visibility over time. Pure functions shared by the live preview
+/// and the export compositor so both agree frame-for-frame.
+enum CursorTypingHider {
+    /// The cursor stays hidden this long after the last keystroke in a burst.
+    static let holdDuration = 0.9
+    /// Fade-out before a segment starts / fade-in after it ends.
+    static let fadeDuration = 0.15
+    /// Normalized distance (fraction of frame) the cursor must travel from the
+    /// burst start to reveal itself early — grabbing the mouse mid-burst.
+    static let revealDistance = 0.01
+
+    /// Burst = consecutive keystrokes with gaps smaller than `holdDuration`.
+    /// A segment runs from the first keystroke to `holdDuration` after the
+    /// last one, cut short if the mouse moves away from where typing began.
+    static func segments(
+        keyTimes: [Double],
+        cursorTrack: [CursorPosition],
+        duration: Double
+    ) -> [CursorHiddenSegment] {
+        let keys = keyTimes.filter { $0 >= 0 && $0 <= duration }.sorted()
+        guard let first = keys.first else { return [] }
+
+        var bursts: [CursorHiddenSegment] = []
+        var burstStart = first
+        var lastKey = first
+        for key in keys.dropFirst() {
+            if key - lastKey > holdDuration {
+                bursts.append(CursorHiddenSegment(start: burstStart, end: min(duration, lastKey + holdDuration)))
+                burstStart = key
+            }
+            lastKey = key
+        }
+        bursts.append(CursorHiddenSegment(start: burstStart, end: min(duration, lastKey + holdDuration)))
+
+        for index in bursts.indices {
+            if let reveal = revealTime(in: bursts[index], cursorTrack: cursorTrack) {
+                bursts[index].end = max(bursts[index].start, reveal)
+            }
+        }
+        return bursts.filter { $0.end > $0.start }
+    }
+
+    /// First track sample that moved far enough from the burst origin to count
+    /// as the user reaching for the mouse.
+    private static func revealTime(
+        in segment: CursorHiddenSegment,
+        cursorTrack: [CursorPosition]
+    ) -> Double? {
+        guard let originSample = cursorTrack.first(where: { $0.time >= segment.start }) else {
+            return nil
+        }
+        for sample in cursorTrack where sample.time > originSample.time && sample.time <= segment.end {
+            let dx = sample.x - originSample.x
+            let dy = sample.y - originSample.y
+            if (dx * dx + dy * dy).squareRoot() > revealDistance {
+                return sample.time
+            }
+        }
+        return nil
+    }
+
+    /// Cursor visibility multiplier (0 = hidden, 1 = fully visible) at `time`,
+    /// with short fades at segment edges. Segments never overlap by construction.
+    static func opacity(at time: Double, in segments: [CursorHiddenSegment]) -> Double {
+        for segment in segments {
+            guard time >= segment.start - fadeDuration,
+                  time <= segment.end + fadeDuration else { continue }
+            if time < segment.start {
+                return max(0, (segment.start - time) / fadeDuration)
+            }
+            if time > segment.end {
+                return max(0, (time - segment.end) / fadeDuration)
+            }
+            return 0
         }
         return 1
     }

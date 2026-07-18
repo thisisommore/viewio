@@ -862,7 +862,7 @@ private struct CursorPlayerOverlay: View {
                                 state.clickScale,
                                 anchor: UnitPoint(x: hotspot.x, y: hotspot.y)
                             )
-                            .opacity(sample.opacity)
+                            .opacity(sample.opacity * state.typingOpacity)
                             .shadow(
                                 color: .black.opacity(index == 0 ? 0.2 : 0.06),
                                 radius: index == 0 ? 1.2 : 0.4,
@@ -2001,6 +2001,30 @@ private struct CursorInspectorPanel: View {
                             model.setCursorClickEffect(effect)
                         }
                     }
+                }
+
+                sectionLabel("Behavior")
+                HStack {
+                    Text("Hide while typing")
+                        .font(.callout)
+                    Spacer()
+                    Toggle(
+                        "Hide while typing",
+                        isOn: Binding(
+                            get: { model.cursorSettings.hideWhenTyping },
+                            set: model.setCursorHideWhenTyping
+                        )
+                    )
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .disabled(!model.cursorSettings.isEnabled || !model.hasKeyData)
+                }
+                if !model.hasKeyData {
+                    Text("No typing data in this recording. New recordings capture keystroke times (requires Accessibility access).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 motionBlurSection
