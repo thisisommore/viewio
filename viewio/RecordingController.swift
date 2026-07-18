@@ -215,8 +215,10 @@ final class RecordingController: NSObject, ObservableObject {
     @Published private(set) var pickedFilter: SCContentFilter?
     /// Best-effort display name of the picked content.
     @Published private(set) var pickedContentName: String?
-    /// Shows the confirmation alert before discarding the current recording.
+    /// Shows the confirmation alert before discarding a finished recording.
     @Published var showsDiscardRecordingConfirmation = false
+    /// True while an in-progress recording is being torn down without saving.
+    @Published private(set) var isDiscarding = false
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -237,6 +239,10 @@ final class RecordingController: NSObject, ObservableObject {
     private var wasLeftButtonDown = false
     /// Host time when capture is considered started (aligns cursor track to video).
     private var recordingHostStart: TimeInterval?
+    /// When set, stop/finish callbacks delete partial files and return to idle.
+    private var discardRequested = false
+    /// Ensures discard/finalize teardown runs only once per capture session.
+    private var captureTeardownHandled = false
 
     var isRecording: Bool {
         switch state {
@@ -259,32 +265,62 @@ final class RecordingController: NSObject, ObservableObject {
     func startRecording() {
         guard !isRecording else { return }
 
+        discardRequested = false
+        isDiscarding = false
+        captureTeardownHandled = false
         state = .preparing
         elapsed = 0
 
         Task {
             do {
+                if shouldAbortStart() { return }
                 if captureMicrophone {
                     let authorized = await requestMicrophoneAuthorization()
                     guard authorized else {
                         throw RecordingError.microphoneDenied
                     }
                 }
+                if shouldAbortStart() { return }
                 if captureCamera {
                     let authorized = await CameraRecorder.requestAccess()
                     guard authorized else {
                         throw RecordingError.cameraDenied
                     }
                 }
+                if shouldAbortStart() { return }
                 try await configureAndStartCapture()
+                if discardRequested {
+                    await stopCaptureForDiscard()
+                    return
+                }
+                if captureTeardownHandled { return }
+            } catch is CancellationError {
+                if discardRequested || isDiscarding {
+                    completeInProgressDiscard()
+                }
             } catch {
-                finishWithError(error)
+                if discardRequested || isDiscarding {
+                    completeInProgressDiscard()
+                } else if !captureTeardownHandled {
+                    finishWithError(error)
+                }
             }
         }
     }
 
+    /// Returns true when the start task should exit because the user discarded
+    /// mid-prepare (or teardown already ran). Completes discard if still pending.
+    private func shouldAbortStart() -> Bool {
+        if captureTeardownHandled { return true }
+        if discardRequested {
+            completeInProgressDiscard()
+            return true
+        }
+        return false
+    }
+
     func stopRecording() {
-        guard let stream, isRecording else { return }
+        guard let stream, isRecording, !discardRequested else { return }
         state = .stopping
         stopTimer()
 
@@ -294,6 +330,27 @@ final class RecordingController: NSObject, ObservableObject {
             } catch {
                 finishWithError(error)
             }
+        }
+    }
+
+    /// Abandons an in-progress capture, deletes any partial files, and returns
+    /// to the new-recording setup UI.
+    func discardInProgressRecording() {
+        switch state {
+        case .preparing, .recording:
+            break
+        default:
+            return
+        }
+
+        discardRequested = true
+        isDiscarding = true
+        state = .stopping
+        stopTimer()
+        stopCursorTracking()
+
+        Task {
+            await stopCaptureForDiscard()
         }
     }
 
@@ -375,27 +432,73 @@ final class RecordingController: NSObject, ObservableObject {
             && abs(a.width - b.width) < 1 && abs(a.height - b.height) < 1
     }
 
-    /// Asks for confirmation before discarding the current recording; the
+    /// Asks for confirmation before discarding a finished recording; the
     /// alert lives in ContentView and calls `discardRecording()` on confirm.
     func requestNewRecording() {
         guard case .finished = state else { return }
         showsDiscardRecordingConfirmation = true
     }
 
+    /// Deletes a finished recording and returns to the new-recording setup UI.
     func discardRecording() {
         if case let .finished(url) = state {
-            try? FileManager.default.removeItem(at: url)
-            try? FileManager.default.removeItem(at: cameraSidecarURL(for: url))
-            try? FileManager.default.removeItem(at: cameraCornerSidecarURL(for: url))
-            try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("cursor.json"))
-            try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("clicks.json"))
+            removeRecordingFiles(at: url)
         }
         resetCaptureReferences()
         state = .idle
     }
 
+    /// Stops the live stream (if any) after a discard request. Finish callbacks
+    /// or this method itself then delete partial files and return to idle.
+    private func stopCaptureForDiscard() async {
+        cameraRecorder?.invalidate()
+        cameraRecorder = nil
+
+        if let stream {
+            do {
+                try await stream.stopCapture()
+            } catch {
+                // Stream may already be stopped; still finish the discard path.
+            }
+        }
+
+        // Finish delegate usually runs first; this covers discard while still
+        // preparing (no stream yet) or when the finish callback never arrives.
+        completeInProgressDiscard()
+    }
+
+    /// Idempotent: safe if both the stream finish callback and discard path run.
+    private func completeInProgressDiscard() {
+        guard !captureTeardownHandled else { return }
+        captureTeardownHandled = true
+
+        let url = outputURL
+        cameraRecorder?.invalidate()
+        if let url {
+            removeRecordingFiles(at: url)
+        }
+        discardRequested = false
+        isDiscarding = false
+        resetCaptureReferences()
+        state = .idle
+    }
+
+    private func removeRecordingFiles(at url: URL) {
+        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: cameraSidecarURL(for: url))
+        try? FileManager.default.removeItem(at: cameraCornerSidecarURL(for: url))
+        try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("cursor.json"))
+        try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("clicks.json"))
+    }
+
     private func configureAndStartCapture() async throws {
+        if discardRequested || captureTeardownHandled {
+            throw CancellationError()
+        }
         let content = try await SCShareableContent.current
+        if discardRequested || captureTeardownHandled {
+            throw CancellationError()
+        }
         let displays = content.displays
         guard !displays.isEmpty else {
             throw RecordingError.noDisplay
@@ -579,7 +682,16 @@ final class RecordingController: NSObject, ObservableObject {
         self.recordingOutput = recordingOutput
         self.stream = stream
 
+        if discardRequested || captureTeardownHandled {
+            throw CancellationError()
+        }
+
         try await stream.startCapture()
+
+        if discardRequested || captureTeardownHandled {
+            // Stream is live but the user already discarded — caller stops it.
+            return
+        }
 
         if captureCamera, let cameraRecorder, let cameraOutputURL {
             try await cameraRecorder.startRecording(to: cameraOutputURL)
@@ -630,7 +742,17 @@ final class RecordingController: NSObject, ObservableObject {
     }
 
     private func recordingDidStart() {
-        guard case .preparing = state else { return }
+        guard case .preparing = state else {
+            // Discard was requested before the first frame landed — stop now.
+            if discardRequested {
+                Task { await stopCaptureForDiscard() }
+            }
+            return
+        }
+        if discardRequested {
+            Task { await stopCaptureForDiscard() }
+            return
+        }
         state = .recording
         let now = Date()
         startedAt = now
@@ -678,7 +800,13 @@ final class RecordingController: NSObject, ObservableObject {
     private func recordingDidFinish() {
         stopTimer()
         stopCursorTracking()
+        let shouldDiscard = discardRequested || isDiscarding
         Task {
+            if shouldDiscard {
+                completeInProgressDiscard()
+                return
+            }
+            if captureTeardownHandled { return }
             if let cameraRecorder {
                 _ = try? await cameraRecorder.stopRecording()
             }
@@ -687,6 +815,13 @@ final class RecordingController: NSObject, ObservableObject {
     }
 
     private func finalizeRecording() async {
+        if discardRequested || isDiscarding {
+            completeInProgressDiscard()
+            return
+        }
+        guard !captureTeardownHandled else { return }
+        captureTeardownHandled = true
+
         guard let outputURL else {
             state = .failed("The recording finished without creating a video file.")
             resetCaptureReferences()
@@ -700,9 +835,17 @@ final class RecordingController: NSObject, ObservableObject {
     }
 
     private func finishWithError(_ error: Error) {
+        if discardRequested || isDiscarding {
+            completeInProgressDiscard()
+            return
+        }
+        guard !captureTeardownHandled else { return }
+        captureTeardownHandled = true
         stopTimer()
         stopCursorTracking()
         cameraRecorder?.invalidate()
+        discardRequested = false
+        isDiscarding = false
         resetCaptureReferences()
         state = .failed(error.localizedDescription)
     }

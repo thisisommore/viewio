@@ -26,7 +26,9 @@ struct ContentView: View {
                     recorder: recorder,
                     elapsed: recorder.elapsed,
                     isStopping: false,
-                    onStop: recorder.stopRecording
+                    isDiscarding: false,
+                    onStop: recorder.stopRecording,
+                    onDiscard: recorder.discardInProgressRecording
                 )
 
             case .recording:
@@ -34,7 +36,9 @@ struct ContentView: View {
                     recorder: recorder,
                     elapsed: recorder.elapsed,
                     isStopping: false,
-                    onStop: recorder.stopRecording
+                    isDiscarding: false,
+                    onStop: recorder.stopRecording,
+                    onDiscard: recorder.discardInProgressRecording
                 )
 
             case .stopping:
@@ -42,7 +46,9 @@ struct ContentView: View {
                     recorder: recorder,
                     elapsed: recorder.elapsed,
                     isStopping: true,
-                    onStop: {}
+                    isDiscarding: recorder.isDiscarding,
+                    onStop: {},
+                    onDiscard: {}
                 )
 
             case let .finished(url):
@@ -485,7 +491,9 @@ private struct RecordingProgressView: View {
     @ObservedObject var recorder: RecordingController
     let elapsed: TimeInterval
     let isStopping: Bool
+    let isDiscarding: Bool
     let onStop: () -> Void
+    let onDiscard: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -498,13 +506,13 @@ private struct RecordingProgressView: View {
                     .symbolEffect(.pulse, options: .repeating, isActive: !isStopping)
 
                 VStack(spacing: 6) {
-                    Text(isStopping ? "Finishing recording…" : "Recording your screen")
+                    Text(statusTitle)
                         .font(.system(size: 22, weight: .semibold))
-                    Text(isStopping ? "Saving your video" : formattedDuration(elapsed))
+                    Text(statusSubtitle)
                         .font(.system(size: 15, design: .monospaced))
                         .foregroundStyle(.secondary)
 
-                    if recorder.captureCamera {
+                    if recorder.captureCamera, !isStopping {
                         Text("Camera overlay is shown on the selected display")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -514,13 +522,65 @@ private struct RecordingProgressView: View {
 
             Spacer()
 
+            // Secondary action sits above the primary bar so Stop stays bottommost.
+            Button(action: onDiscard) {
+                HStack(spacing: 6) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12, weight: .medium))
+                    Text(isDiscarding ? "Discarding…" : "Discard Recording")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .foregroundStyle(isStopping ? Color.secondary : Color.primary.opacity(0.65))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule()
+                        .fill(Color.primary.opacity(isStopping ? 0.04 : 0.06))
+                )
+                .overlay {
+                    Capsule()
+                        .stroke(Color.primary.opacity(0.08))
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(isStopping)
+            .opacity(isStopping && !isDiscarding ? 0.45 : 1)
+            .padding(.bottom, 16)
+
             Button(action: onStop) {
-                Text(isStopping ? "Stopping…" : "Stop Recording")
+                Text(stopButtonTitle)
                     .font(.system(size: 16, weight: .semibold))
             }
             .buttonStyle(RecordButtonStyle(isDisabled: isStopping))
             .disabled(isStopping)
         }
+    }
+
+    private var statusTitle: String {
+        if isDiscarding {
+            return "Discarding recording…"
+        }
+        if isStopping {
+            return "Finishing recording…"
+        }
+        return "Recording your screen"
+    }
+
+    private var statusSubtitle: String {
+        if isDiscarding {
+            return "Returning to setup"
+        }
+        if isStopping {
+            return "Saving your video"
+        }
+        return formattedDuration(elapsed)
+    }
+
+    private var stopButtonTitle: String {
+        if isStopping && !isDiscarding {
+            return "Stopping…"
+        }
+        return "Stop Recording"
     }
 }
 

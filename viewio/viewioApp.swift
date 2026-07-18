@@ -63,8 +63,13 @@ struct viewioApp: App {
 
             Divider()
 
-            Button("Stop Recording", role: .destructive) {
+            Button("Stop Recording") {
                 recorder.stopRecording()
+            }
+            .disabled(!canStopRecording)
+
+            Button("Discard Recording", role: .destructive) {
+                recorder.discardInProgressRecording()
             }
             .disabled(!canStopRecording)
         } label: {
