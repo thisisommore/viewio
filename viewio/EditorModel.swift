@@ -1782,6 +1782,12 @@ final class EditorModel: ObservableObject {
         return CGAffineTransform(a: safeScale, b: 0, c: 0, d: safeScale, tx: tx, ty: ty)
     }
 
+    /// Normalized cursor position at the playhead (0...1, origin top-left) —
+    /// shown on the fixed-focus mini map in the zoom inspector.
+    var cursorPositionAtPlayhead: CGPoint {
+        preciseCursorPosition(at: playhead)
+    }
+
     /// Precise tip position in normalized video coordinates (origin top-left, 0...1).
     /// Does not apply cinematic/smooth lag — that only affects optional camera styles.
     private func preciseCursorPosition(at time: Double) -> CGPoint {

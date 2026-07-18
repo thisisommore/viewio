@@ -1181,6 +1181,15 @@ private struct ClipInspector: View {
         }
 
         if range.focusMode == .fixedPoint {
+            FixedFocusMap(
+                videoSize: model.videoRenderSize,
+                amount: range.amount,
+                point: range.fixedFocusPoint,
+                cursorPoint: model.cursorPositionAtPlayhead,
+                onChange: { model.setZoomFixedFocusPoint($0, for: range.id) }
+            )
+            .padding(.top, 2)
+
             VStack(spacing: 6) {
                 HStack(spacing: 8) {
                     Text("X")
@@ -1370,6 +1379,79 @@ private struct FocusAnchorGrid: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.primary.opacity(0.05))
         }
+    }
+}
+
+/// Mini map of the recording for fixed-point focus. The frosted rect is the
+/// region the zoom actually shows (frame / amount), centered on the point and
+/// clamped inside the frame exactly like the render clamp. Drag anywhere to
+/// move the point; the X/Y sliders stay available for precise tweaks.
+private struct FixedFocusMap: View {
+    let videoSize: CGSize
+    let amount: Double
+    let point: CGPoint
+    /// Normalized cursor position at the playhead (0...1, origin top-left).
+    let cursorPoint: CGPoint
+    let onChange: (CGPoint) -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let height = proxy.size.height
+            let viewportWidth = width / CGFloat(max(1, amount))
+            let viewportHeight = height / CGFloat(max(1, amount))
+            let centerX = min(width - viewportWidth / 2, max(viewportWidth / 2, point.x * width))
+            let centerY = min(height - viewportHeight / 2, max(viewportHeight / 2, point.y * height))
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.primary.opacity(0.06))
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.primary.opacity(0.18), lineWidth: 1)
+
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.accentColor.opacity(0.22))
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 3))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3)
+                            .stroke(Color.accentColor, lineWidth: 1.25)
+                    }
+                    .frame(width: viewportWidth, height: viewportHeight)
+                    .position(x: centerX, y: centerY)
+
+                // Cursor position in the recording at the playhead.
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 5, height: 5)
+                    .overlay {
+                        Circle()
+                            .stroke(Color.black.opacity(0.35), lineWidth: 0.5)
+                    }
+                    .position(
+                        x: min(width, max(0, cursorPoint.x * width)),
+                        y: min(height, max(0, cursorPoint.y * height))
+                    )
+
+                // Focus point: clamped together with the viewport, so it always
+                // sits at the viewport's center.
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 5, height: 5)
+                    .position(x: centerX, y: centerY)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        onChange(CGPoint(
+                            x: min(1, max(0, value.location.x / width)),
+                            y: min(1, max(0, value.location.y / height))
+                        ))
+                    }
+            )
+        }
+        .aspectRatio(videoSize.width / max(1, videoSize.height), contentMode: .fit)
+        .frame(maxHeight: 180)
     }
 }
 
