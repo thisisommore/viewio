@@ -1529,15 +1529,30 @@ private struct ZoomRangeBlock: View {
     let isSelected: Bool
     let onRemove: () -> Void
 
-    @State private var moveStart: ZoomRange?
-    @State private var resizeStart: ZoomRange?
+    /// What the block's single drag is doing, decided once from where the drag
+    /// started. One gesture (instead of separate move + edge-resize gestures)
+    /// avoids mid-drag gesture re-competition when model updates re-render the
+    /// block — that race made the block flip between moving and resizing.
+    private enum DragKind {
+        case move, resizeLeading, resizeTrailing
+    }
+
+    /// Range captured when the current drag began (the drag's anchor).
+    @State private var dragAnchor: ZoomRange?
+    @State private var dragKind: DragKind?
+    /// Live geometry while dragging. Rendering from local state (instead of
+    /// the model's echoed value) keeps the block glued to the pointer and
+    /// immune to update timing during the drag.
+    @State private var dragRange: ZoomRange?
+
+    private var displayed: ZoomRange { dragRange ?? range }
 
     private var x: CGFloat {
-        trackWidth * CGFloat(range.start / duration)
+        trackWidth * CGFloat(displayed.start / duration)
     }
 
     private var width: CGFloat {
-        max(24, trackWidth * CGFloat((range.end - range.start) / duration))
+        max(24, trackWidth * CGFloat((displayed.end - displayed.start) / duration))
     }
 
     var body: some View {
@@ -1548,7 +1563,7 @@ private struct ZoomRangeBlock: View {
                     .stroke(isSelected ? Color.accentColor : Color.accentColor.opacity(0.65), lineWidth: isSelected ? 2 : 1.25)
             }
             .overlay(alignment: .center) {
-                Text(String(format: "%.2gx", range.amount))
+                Text(String(format: "%.2gx", displayed.amount))
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Color.accentColor)
                     .opacity(width > 46 ? 1 : 0)
@@ -1557,7 +1572,6 @@ private struct ZoomRangeBlock: View {
             .overlay(alignment: .leading) {
                 rangeHandle
                     .padding(.leading, 4)
-                    .highPriorityGesture(resizeGesture(isLeading: true))
             }
             .overlay(alignment: .trailing) {
                 HStack(spacing: 4) {
@@ -1569,12 +1583,11 @@ private struct ZoomRangeBlock: View {
                     .opacity(width > 62 ? 1 : 0)
 
                     rangeHandle
-                        .highPriorityGesture(resizeGesture(isLeading: false))
                 }
                 .padding(.trailing, 4)
             }
             .offset(x: x)
-            .gesture(moveGesture)
+            .gesture(dragGesture)
             .onTapGesture(perform: onSelect)
             .help("Drag to move the zoom range. Drag its edges to resize.")
     }
@@ -1585,52 +1598,53 @@ private struct ZoomRangeBlock: View {
             .frame(width: 4, height: 18)
     }
 
-    private var moveGesture: some Gesture {
+    private var dragGesture: some Gesture {
         DragGesture()
             .onChanged { value in
-                let initial = moveStart ?? range
-                if moveStart == nil {
-                    moveStart = initial
-                }
-                let delta = Double(value.translation.width / trackWidth) * duration
-                let length = initial.end - initial.start
-                let start = min(duration - length, max(0, initial.start + delta))
-                onChange(ZoomRange(id: initial.id, start: start, end: start + length))
-            }
-            .onEnded { _ in
-                moveStart = nil
-            }
-    }
-
-    private func resizeGesture(isLeading: Bool) -> some Gesture {
-        DragGesture()
-            .onChanged { value in
-                let initial = resizeStart ?? range
-                if resizeStart == nil {
-                    resizeStart = initial
+                guard trackWidth > 1 else { return }
+                let anchor: ZoomRange
+                let kind: DragKind
+                if let dragAnchor, let dragKind {
+                    anchor = dragAnchor
+                    kind = dragKind
+                } else {
+                    anchor = range
+                    kind = Self.classifyDrag(startX: value.startLocation.x, width: width)
+                    dragAnchor = anchor
+                    dragKind = kind
                 }
                 let delta = Double(value.translation.width / trackWidth) * duration
                 let minimumLength = 0.25
-                let updated: ZoomRange
-
-                if isLeading {
-                    updated = ZoomRange(
-                        id: initial.id,
-                        start: min(initial.end - minimumLength, max(0, initial.start + delta)),
-                        end: initial.end
-                    )
-                } else {
-                    updated = ZoomRange(
-                        id: initial.id,
-                        start: initial.start,
-                        end: max(initial.start + minimumLength, min(duration, initial.end + delta))
-                    )
+                var updated = anchor
+                switch kind {
+                case .move:
+                    let length = anchor.end - anchor.start
+                    let start = min(duration - length, max(0, anchor.start + delta))
+                    updated.start = start
+                    updated.end = start + length
+                case .resizeLeading:
+                    updated.start = min(anchor.end - minimumLength, max(0, anchor.start + delta))
+                case .resizeTrailing:
+                    updated.end = max(anchor.start + minimumLength, min(duration, anchor.end + delta))
                 }
+                dragRange = updated
                 onChange(updated)
             }
             .onEnded { _ in
-                resizeStart = nil
+                // The model already holds the last onChanged value, so dropping
+                // the local override just hands rendering back to it.
+                dragAnchor = nil
+                dragKind = nil
+                dragRange = nil
             }
+    }
+
+    /// Strips near the edge handles resize the range; the middle moves it.
+    private static func classifyDrag(startX: CGFloat, width: CGFloat) -> DragKind {
+        let handleZone = min(12, width * 0.35)
+        if startX <= handleZone { return .resizeLeading }
+        if startX >= width - handleZone { return .resizeTrailing }
+        return .move
     }
 }
 

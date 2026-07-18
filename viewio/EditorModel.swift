@@ -205,6 +205,12 @@ final class EditorModel: ObservableObject {
     private var musicAsset: AVURLAsset?
     /// TrackID of the music track inside the current composition (for the mix).
     private var compositionMusicTrackID: CMPersistentTrackID?
+    /// Tracks of the composition currently attached to the player, kept so
+    /// zoom-only changes can swap just the video composition on the live item
+    /// instead of rebuilding and replacing the whole player item (which flickers).
+    private var previewCompositionVideoTrack: AVMutableCompositionTrack?
+    private var previewCompositionCameraTrack: AVMutableCompositionTrack?
+    private var previewCompositionDuration: CMTime = .zero
     /// Pixel size of the composed video frame (for letterboxed cursor overlay).
     @Published private(set) var videoRenderSize: CGSize = CGSize(width: 1920, height: 1080)
     @Published private(set) var timelineThumbnails: [NSImage] = []
@@ -491,7 +497,7 @@ final class EditorModel: ObservableObject {
         let end = min(duration, start + min(3.2, max(0.8, duration)))
         zoomRanges.append(ZoomRange(start: start, end: end))
         selectedZoomID = zoomRanges.last?.id
-        rebuildPreview(preservingPlayhead: true)
+        refreshZoomVideoComposition()
     }
 
     func updateZoomRange(_ range: ZoomRange) {
@@ -501,25 +507,25 @@ final class EditorModel: ObservableObject {
         updated.start = min(max(0, range.start), max(0, duration - minimumLength))
         updated.end = min(duration, max(updated.start + minimumLength, range.end))
         zoomRanges[index] = updated
-        rebuildPreview(preservingPlayhead: true)
+        refreshZoomVideoComposition()
     }
 
     func setZoomAmount(_ amount: Double, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].amount = min(3, max(1, amount))
-        rebuildPreview(preservingPlayhead: true)
+        refreshZoomVideoComposition()
     }
 
     func setZoomEntryAnimation(_ animation: ZoomAnimation, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].entryAnimation = animation
-        rebuildPreview(preservingPlayhead: true)
+        refreshZoomVideoComposition()
     }
 
     func setZoomExitAnimation(_ animation: ZoomAnimation, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].exitAnimation = animation
-        rebuildPreview(preservingPlayhead: true)
+        refreshZoomVideoComposition()
     }
 
     func removeZoomRange(id: UUID) {
@@ -527,7 +533,7 @@ final class EditorModel: ObservableObject {
         if selectedZoomID == id {
             selectedZoomID = nil
         }
-        rebuildPreview(preservingPlayhead: true)
+        refreshZoomVideoComposition()
     }
 
     func setCursorEnabled(_ enabled: Bool) {
@@ -1128,6 +1134,9 @@ final class EditorModel: ObservableObject {
         item.preferredPeakBitRate = 0
         item.preferredMaximumResolution = CGSize(width: 8192, height: 8192)
         player.replaceCurrentItem(with: item)
+        previewCompositionVideoTrack = build.videoTrack
+        previewCompositionCameraTrack = build.cameraTrack
+        previewCompositionDuration = CMTime(seconds: build.duration, preferredTimescale: 600)
         duration = build.duration
         videoRenderSize = build.renderSize
         playhead = previousPlayhead
@@ -1139,11 +1148,34 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    /// Zoom-only changes (range bounds, amount, animation style) touch just the
+    /// video composition's transform keyframes — the composition's tracks stay
+    /// identical. Swapping `videoComposition` on the live player item applies
+    /// them without a decoder restart, so dragging a zoom edge no longer
+    /// flickers (a full item rebuild is only needed when tracks change).
+    private func refreshZoomVideoComposition() {
+        guard let item = player.currentItem,
+              let compositionTrack = previewCompositionVideoTrack,
+              let sourceVideoTrack else {
+            rebuildPreview(preservingPlayhead: true)
+            return
+        }
+        item.videoComposition = makeVideoComposition(
+            compositionTrack: compositionTrack,
+            cameraTrack: previewCompositionCameraTrack,
+            sourceTrack: sourceVideoTrack,
+            duration: previewCompositionDuration,
+            includeCursorOverlay: false
+        )
+    }
+
     private func makeComposition(
         includeCursorOverlay: Bool
     ) -> (
         composition: AVMutableComposition,
         videoComposition: AVMutableVideoComposition,
+        videoTrack: AVMutableCompositionTrack,
+        cameraTrack: AVMutableCompositionTrack?,
         duration: Double,
         renderSize: CGSize
     )? {
@@ -1256,6 +1288,8 @@ final class EditorModel: ObservableObject {
         return (
             composition,
             videoComposition,
+            compositionVideoTrack,
+            compositionCameraTrack,
             max(0, cursor.seconds),
             videoComposition.renderSize
         )
