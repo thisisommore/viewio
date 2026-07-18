@@ -21,8 +21,9 @@ struct CursorSettings: Equatable {
     var isEnabled: Bool = true
     var style: CursorStyle = .macArrow
     var motion: CursorMotionStyle = .smooth
-    var size: Double = 1.0
-    var clickEffect: CursorClickEffect = .ripple
+    /// Multiplier on the base cursor size (1 = 100%, max 4 = 400%).
+    var size: Double = 4.0
+    var clickEffect: CursorClickEffect = .shrink
 
     static let `default` = CursorSettings()
 }
