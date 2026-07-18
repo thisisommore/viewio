@@ -1130,6 +1130,100 @@ private struct ClipInspector: View {
 
         Divider()
 
+        HStack {
+            Text("Focus")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Picker("Focus", selection: Binding(
+                get: { range.focusMode },
+                set: { model.setZoomFocusMode($0, for: range.id) }
+            )) {
+                ForEach(ZoomFocusMode.allCases) { mode in
+                    Text(mode.title)
+                        .tag(mode)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 112, alignment: .trailing)
+        }
+        .help("Where the zoomed view places its focus")
+
+        if range.focusMode == .anchor {
+            FocusAnchorGrid(
+                selection: range.focusAnchor,
+                onChange: { model.setZoomFocusAnchor($0, for: range.id) }
+            )
+            .frame(maxWidth: .infinity)
+            .padding(.top, 2)
+
+            if range.focusAnchor != .center {
+                HStack(spacing: 8) {
+                    Text("Padding")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Slider(
+                        value: Binding(
+                            get: { range.focusPadding },
+                            set: { model.setZoomFocusPadding($0, for: range.id) }
+                        ),
+                        in: 0...0.25
+                    )
+                    .tint(.accentColor)
+                    Text("\(Int((range.focusPadding * 100).rounded()))%")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, alignment: .trailing)
+                }
+                .help("Distance between the cursor and the chosen frame edges")
+            }
+        }
+
+        if range.focusMode == .fixedPoint {
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    Text("X")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                    Slider(
+                        value: Binding(
+                            get: { range.fixedFocusPoint.x },
+                            set: { model.setZoomFixedFocusPoint(CGPoint(x: $0, y: range.fixedFocusPoint.y), for: range.id) }
+                        ),
+                        in: 0...1
+                    )
+                    .tint(.accentColor)
+                    Text("\(Int((range.fixedFocusPoint.x * 100).rounded()))%")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, alignment: .trailing)
+                }
+                HStack(spacing: 8) {
+                    Text("Y")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                    Slider(
+                        value: Binding(
+                            get: { range.fixedFocusPoint.y },
+                            set: { model.setZoomFixedFocusPoint(CGPoint(x: range.fixedFocusPoint.x, y: $0), for: range.id) }
+                        ),
+                        in: 0...1
+                    )
+                    .tint(.accentColor)
+                    Text("\(Int((range.fixedFocusPoint.y * 100).rounded()))%")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, alignment: .trailing)
+                }
+            }
+            .help("The viewport stays centered on this point of the recording (Y: 0% = top)")
+        }
+
+        Divider()
+
         ZoomAnimationPicker(
             title: "Entry",
             selection: range.entryAnimation,
@@ -1235,6 +1329,46 @@ private struct ZoomAnimationPicker: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(width: 112, alignment: .trailing)
+        }
+    }
+}
+
+/// 3x3 pad for pinning the zoom focus to a frame anchor (corners, edges, center).
+private struct FocusAnchorGrid: View {
+    let selection: FocusAnchor
+    let onChange: (FocusAnchor) -> Void
+
+    private let rows: [[FocusAnchor]] = [
+        [.topLeft, .top, .topRight],
+        [.leading, .center, .trailing],
+        [.bottomLeft, .bottom, .bottomRight]
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(rows, id: \.self) { row in
+                HStack(spacing: 0) {
+                    ForEach(row) { anchor in
+                        Button {
+                            onChange(anchor)
+                        } label: {
+                            Circle()
+                                .fill(selection == anchor ? Color.accentColor : Color.primary.opacity(0.25))
+                                .frame(width: selection == anchor ? 7 : 5, height: selection == anchor ? 7 : 5)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(anchor.title)
+                    }
+                }
+            }
+        }
+        .padding(6)
+        .frame(width: 84, height: 60)
+        .background {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.05))
         }
     }
 }

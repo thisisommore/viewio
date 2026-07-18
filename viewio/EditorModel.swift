@@ -38,6 +38,14 @@ struct ZoomRange: Identifiable, Equatable {
     var amount: Double
     var entryAnimation: ZoomAnimation
     var exitAnimation: ZoomAnimation
+    /// Where the zoomed viewport places its focus.
+    var focusMode: ZoomFocusMode
+    /// Frame anchor the cursor is pinned to (anchor mode).
+    var focusAnchor: FocusAnchor
+    /// Frame-edge padding fraction for anchored focus (0.08 = 8%).
+    var focusPadding: Double
+    /// Normalized video-space point the viewport centers on (fixed mode).
+    var fixedFocusPoint: CGPoint
 
     init(
         id: UUID = UUID(),
@@ -45,7 +53,11 @@ struct ZoomRange: Identifiable, Equatable {
         end: Double,
         amount: Double = 1.24,
         entryAnimation: ZoomAnimation = .smooth,
-        exitAnimation: ZoomAnimation = .smooth
+        exitAnimation: ZoomAnimation = .smooth,
+        focusMode: ZoomFocusMode = .followCursor,
+        focusAnchor: FocusAnchor = .center,
+        focusPadding: Double = 0.08,
+        fixedFocusPoint: CGPoint = CGPoint(x: 0.5, y: 0.5)
     ) {
         self.id = id
         self.start = start
@@ -53,6 +65,10 @@ struct ZoomRange: Identifiable, Equatable {
         self.amount = amount
         self.entryAnimation = entryAnimation
         self.exitAnimation = exitAnimation
+        self.focusMode = focusMode
+        self.focusAnchor = focusAnchor
+        self.focusPadding = focusPadding
+        self.fixedFocusPoint = fixedFocusPoint
     }
 }
 
@@ -94,6 +110,77 @@ private extension ZoomAnimation {
             // Feels much less snappy than classic smoothstep for camera zooms.
             return t * t * t * (t * (t * 6 - 15) + 10)
         }
+    }
+}
+
+/// Where the zoomed viewport places its focus, per zoom range.
+enum ZoomFocusMode: String, CaseIterable, Identifiable {
+    /// Magnify around the cursor wherever it is (default).
+    case followCursor
+    /// Pin the cursor to a chosen frame anchor (corner / edge / center).
+    case anchor
+    /// Keep the viewport centered on a fixed point, ignoring the cursor.
+    case fixedPoint
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .followCursor: "Follow cursor"
+        case .anchor: "Anchor"
+        case .fixedPoint: "Fixed point"
+        }
+    }
+}
+
+/// Frame anchor for pinned zoom focus (3x3 pad).
+enum FocusAnchor: String, CaseIterable, Identifiable {
+    case topLeft, top, topRight
+    case leading, center, trailing
+    case bottomLeft, bottom, bottomRight
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .topLeft: "Top left"
+        case .top: "Top"
+        case .topRight: "Top right"
+        case .leading: "Left"
+        case .center: "Center"
+        case .trailing: "Right"
+        case .bottomLeft: "Bottom left"
+        case .bottom: "Bottom"
+        case .bottomRight: "Bottom right"
+        }
+    }
+
+    /// 0 = left edge, 0.5 = middle, 1 = right edge.
+    private var column: Double {
+        switch self {
+        case .topLeft, .leading, .bottomLeft: 0
+        case .top, .center, .bottom: 0.5
+        case .topRight, .trailing, .bottomRight: 1
+        }
+    }
+
+    /// 0 = top edge, 0.5 = middle, 1 = bottom edge (origin top-left).
+    private var row: Double {
+        switch self {
+        case .topLeft, .top, .topRight: 0
+        case .leading, .center, .trailing: 0.5
+        case .bottomLeft, .bottom, .bottomRight: 1
+        }
+    }
+
+    /// Where the focus lands in the output frame. `padding` is a fraction of
+    /// the frame kept between the focus and the nearest edges (no effect on
+    /// `.center`). Origin top-left, matching normalized video space.
+    func targetPoint(in size: CGSize, padding: Double) -> CGPoint {
+        let pad = min(0.25, max(0, padding))
+        let x = column == 0.5 ? size.width / 2 : size.width * (column == 0 ? pad : 1 - pad)
+        let y = row == 0.5 ? size.height / 2 : size.height * (row == 0 ? pad : 1 - pad)
+        return CGPoint(x: x, y: y)
     }
 }
 
@@ -525,6 +612,33 @@ final class EditorModel: ObservableObject {
     func setZoomExitAnimation(_ animation: ZoomAnimation, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].exitAnimation = animation
+        refreshZoomVideoComposition()
+    }
+
+    func setZoomFocusMode(_ mode: ZoomFocusMode, for id: UUID) {
+        guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
+        zoomRanges[index].focusMode = mode
+        refreshZoomVideoComposition()
+    }
+
+    func setZoomFocusAnchor(_ anchor: FocusAnchor, for id: UUID) {
+        guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
+        zoomRanges[index].focusAnchor = anchor
+        refreshZoomVideoComposition()
+    }
+
+    func setZoomFocusPadding(_ padding: Double, for id: UUID) {
+        guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
+        zoomRanges[index].focusPadding = min(0.25, max(0, padding))
+        refreshZoomVideoComposition()
+    }
+
+    func setZoomFixedFocusPoint(_ point: CGPoint, for id: UUID) {
+        guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
+        zoomRanges[index].fixedFocusPoint = CGPoint(
+            x: min(1, max(0, point.x)),
+            y: min(1, max(0, point.y))
+        )
         refreshZoomVideoComposition()
     }
 
@@ -1464,12 +1578,15 @@ final class EditorModel: ObservableObject {
                 let length = max(0.001, range.end - range.start)
                 let transition = transitionDuration(for: range, totalDuration: length)
                 scale = zoomScale(at: time, range: range, transition: transition)
-                focus = zoomFocus(at: time, in: range)
+                let cursorFocus = zoomFocus(at: time, in: range)
+                // The sample's focus is the zoom pivot (zoom-blur epicenter).
+                focus = range.focusMode == .fixedPoint ? range.fixedFocusPoint : cursorFocus
                 zoom = zoomTransform(
                     renderSize: renderSize,
                     scale: scale,
-                    center: focus,
-                    targetAmount: CGFloat(min(3, max(1, range.amount)))
+                    center: cursorFocus,
+                    targetAmount: CGFloat(min(3, max(1, range.amount))),
+                    range: range
                 )
             } else {
                 scale = 1
@@ -1613,13 +1730,15 @@ final class EditorModel: ObservableObject {
         preciseCursorPosition(at: time)
     }
 
-    /// Builds a transform that scales the frame and keeps the focus point at the
-    /// viewport center. `center` is normalized video space (origin top-left).
+    /// Builds a transform that scales the frame and places the zoom anchor
+    /// according to the range's focus mode. `center` is the cursor position in
+    /// normalized video space (origin top-left).
     private func zoomTransform(
         renderSize: CGSize,
         scale: CGFloat,
         center: CGPoint,
-        targetAmount: CGFloat
+        targetAmount: CGFloat,
+        range: ZoomRange
     ) -> CGAffineTransform {
         let safeScale = CGFloat(min(3, max(1, Double(scale))))
         guard safeScale > 1.0001,
@@ -1628,18 +1747,38 @@ final class EditorModel: ObservableObject {
             return .identity
         }
 
-        // Focus exactly on the cursor so the zoom camera follows it and the
-        // pointer stays in view. Clamping the focus inward prevented black bars
-        // but pushed the cursor toward the crop edge, where the arrow image
-        // got clipped and looked like it disappeared.
         let rawX = Double(center.x.isFinite ? center.x : 0.5)
         let rawY = Double(center.y.isFinite ? center.y : 0.5)
-        let anchorX = CGFloat(rawX) * renderSize.width
-        let anchorY = CGFloat(rawY) * renderSize.height
 
-        // T * p = scale * p + (1 - scale) * anchor
-        let tx = (1 - safeScale) * anchorX
-        let ty = (1 - safeScale) * anchorY
+        // Anchor: the video point the zoom pivots around; target: where that
+        // point lands in the output frame (both in pixels, origin top-left).
+        let anchor: CGPoint
+        let target: CGPoint
+        switch range.focusMode {
+        case .followCursor:
+            // Cursor stays exactly where it is; content magnifies around it.
+            anchor = CGPoint(x: rawX * renderSize.width, y: rawY * renderSize.height)
+            target = anchor
+        case .anchor:
+            // Cursor is pinned to the chosen frame anchor (with padding).
+            anchor = CGPoint(x: rawX * renderSize.width, y: rawY * renderSize.height)
+            target = range.focusAnchor.targetPoint(in: renderSize, padding: range.focusPadding)
+        case .fixedPoint:
+            // Cursor is ignored; the viewport centers on the fixed point.
+            let fx = min(1, max(0, Double(range.fixedFocusPoint.x.isFinite ? range.fixedFocusPoint.x : 0.5)))
+            let fy = min(1, max(0, Double(range.fixedFocusPoint.y.isFinite ? range.fixedFocusPoint.y : 0.5)))
+            anchor = CGPoint(x: fx * renderSize.width, y: fy * renderSize.height)
+            target = CGPoint(x: renderSize.width / 2, y: renderSize.height / 2)
+        }
+
+        var tx = target.x - safeScale * anchor.x
+        var ty = target.y - safeScale * anchor.y
+        // Keep the scaled video covering the whole frame — never reveal beyond
+        // the video edges. For followCursor this is already satisfied, and for
+        // pinned modes it slides the viewport along the edges instead of
+        // showing black when the focus sits near the border.
+        tx = min(0, max((1 - safeScale) * renderSize.width, tx))
+        ty = min(0, max((1 - safeScale) * renderSize.height, ty))
         return CGAffineTransform(a: safeScale, b: 0, c: 0, d: safeScale, tx: tx, ty: ty)
     }
 
@@ -1792,7 +1931,8 @@ final class EditorModel: ObservableObject {
             renderSize: renderSize,
             scale: scale,
             center: center,
-            targetAmount: CGFloat(min(3, max(1, range.amount)))
+            targetAmount: CGFloat(min(3, max(1, range.amount))),
+            range: range
         )
         return finiteTransform(baseTransform.concatenating(zoom)) ?? baseTransform
     }
