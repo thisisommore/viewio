@@ -1510,6 +1510,10 @@ private struct ZoomLane: View {
                     }
                     .frame(height: 40)
                     .padding(.trailing, 40)
+                    // Fixed named space for zoom-block drags: block offsets (x)
+                    // are measured in this space, so gesture locations and
+                    // translations resolve consistently while blocks move.
+                    .coordinateSpace(name: "zoomLaneTrack")
                 }
             }
             .padding(.top, 4)
@@ -1586,9 +1590,13 @@ private struct ZoomRangeBlock: View {
                 }
                 .padding(.trailing, 4)
             }
-            .offset(x: x)
+            // The drag gesture resolves locations in the track's named
+            // coordinate space (fixed), not the block's local space, which
+            // shifts with `offset` when a leading-edge drag changes `x` —
+            // that feedback made start-pill drags oscillate.
             .gesture(dragGesture)
             .onTapGesture(perform: onSelect)
+            .offset(x: x)
             .help("Drag to move the zoom range. Drag its edges to resize.")
     }
 
@@ -1599,7 +1607,7 @@ private struct ZoomRangeBlock: View {
     }
 
     private var dragGesture: some Gesture {
-        DragGesture()
+        DragGesture(coordinateSpace: .named("zoomLaneTrack"))
             .onChanged { value in
                 guard trackWidth > 1 else { return }
                 let anchor: ZoomRange
@@ -1609,7 +1617,9 @@ private struct ZoomRangeBlock: View {
                     kind = dragKind
                 } else {
                     anchor = range
-                    kind = Self.classifyDrag(startX: value.startLocation.x, width: width)
+                    // startLocation is in track space; subtract the block's
+                    // offset to get the press point in block-local terms.
+                    kind = Self.classifyDrag(startX: value.startLocation.x - x, width: width)
                     dragAnchor = anchor
                     dragKind = kind
                 }
