@@ -943,7 +943,7 @@ private struct ClickOverlayShape: View {
 private struct ClipInspector: View {
     @ObservedObject var model: EditorModel
 
-    private let speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0]
+    private let speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0, 8.0]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
