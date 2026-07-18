@@ -211,11 +211,17 @@ final class EditorModel: ObservableObject {
     @Published private(set) var timelineThumbnailTimes: [Double] = []
 
     private(set) var captureMode: CaptureMode
+    /// Original recording-space cursor samples (never mutated by edits).
+    private var sourceCursorTrack: [CursorPosition] = []
+    /// Original recording-space click times (never mutated by edits).
+    private var sourceClickEvents: [ClickEvent] = []
+    /// Cursor samples remapped onto the current composition (output) timeline.
     private var cursorTrack: [CursorPosition] = []
     /// Point size of the recorded region (from cursor.json) for cursor scaling.
     private var cursorCaptureSizePoints: CGSize?
     /// Precise video-space track (no smoothing) — used to draw the cursor on content.
     private var preciseCursorTrack: [CursorPosition] = []
+    /// Click events remapped onto the current composition timeline.
     private var clickEvents: [ClickEvent] = []
     /// Same zoom transforms used by the video composition — cursor overlay must
     /// sample these so tip and content stay locked when zoomed.
@@ -351,6 +357,7 @@ final class EditorModel: ObservableObject {
         )
         clips.replaceSubrange(clipIndex...clipIndex, with: [left, right])
         selectedClipID = right.id
+        rebuildTimelineCursorData()
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -382,6 +389,9 @@ final class EditorModel: ObservableObject {
 
         clips.remove(at: index)
         remapZoomRangesRemoving(from: removedStart, to: removedEnd)
+        // Drop cursor/click samples that lived only in the deleted source range
+        // and retime the rest onto the new composition timeline.
+        rebuildTimelineCursorData()
 
         if selectedClipID == id {
             if index > 0 {
@@ -471,6 +481,7 @@ final class EditorModel: ObservableObject {
     func setSpeed(_ speed: Double, for clipID: UUID) {
         guard let index = clips.firstIndex(where: { $0.id == clipID }) else { return }
         clips[index].speed = speed
+        rebuildTimelineCursorData()
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -1034,10 +1045,9 @@ final class EditorModel: ObservableObject {
             sourceAsset = asset
             sourceVideoTrack = videoTrack
             sourceAudioTracks = audioTracks
-            cursorTrack = loadCursorTrack()
-            clickEvents = loadClickEvents()
-            hasCursorData = !cursorTrack.isEmpty
-            refreshProcessedCursorTrack()
+            sourceCursorTrack = loadCursorTrack()
+            sourceClickEvents = loadClickEvents()
+            hasCursorData = !sourceCursorTrack.isEmpty
             // Default custom cursor on when we have track data (system cursor is hidden on record).
             var settings = cursorSettings
             settings.isEnabled = hasCursorData
@@ -1054,6 +1064,7 @@ final class EditorModel: ObservableObject {
 
             clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
             selectedClipID = clips.first?.id
+            rebuildTimelineCursorData()
             duration = seconds
             loadState = .ready
             rebuildPreview(preservingPlayhead: false)
@@ -1440,6 +1451,73 @@ final class EditorModel: ObservableObject {
     private func refreshProcessedCursorTrack() {
         // Precise: where the system cursor actually was (for drawing on UI).
         preciseCursorTrack = CursorMotion.process(track: cursorTrack, motion: .precise)
+    }
+
+    /// Maps original recording-space cursor/click samples onto the current
+    /// composition timeline using `clips`. Samples that fall only inside a
+    /// deleted section are dropped; later samples shift earlier so playhead
+    /// time matches the edited video (including speed changes).
+    private func rebuildTimelineCursorData() {
+        guard !sourceCursorTrack.isEmpty || !sourceClickEvents.isEmpty, !clips.isEmpty else {
+            cursorTrack = []
+            clickEvents = []
+            preciseCursorTrack = []
+            return
+        }
+
+        var mappedTrack: [CursorPosition] = []
+        var mappedClicks: [ClickEvent] = []
+        mappedTrack.reserveCapacity(sourceCursorTrack.count)
+        mappedClicks.reserveCapacity(sourceClickEvents.count)
+
+        var outputTime = 0.0
+        for (clipIndex, clip) in clips.enumerated() {
+            let isLast = clipIndex == clips.count - 1
+            let sourceStart = clip.sourceStart
+            let sourceEnd = clip.sourceEnd
+            let speed = max(0.001, clip.speed)
+
+            for sample in sourceCursorTrack {
+                guard sourceTime(sample.time, isIn: sourceStart, sourceEnd, includeEnd: isLast) else {
+                    continue
+                }
+                let mappedTime = outputTime + (sample.time - sourceStart) / speed
+                mappedTrack.append(
+                    CursorPosition(time: mappedTime, x: sample.x, y: sample.y)
+                )
+            }
+
+            for click in sourceClickEvents {
+                guard sourceTime(click.time, isIn: sourceStart, sourceEnd, includeEnd: isLast) else {
+                    continue
+                }
+                let mappedTime = outputTime + (click.time - sourceStart) / speed
+                mappedClicks.append(ClickEvent(time: mappedTime, button: click.button))
+            }
+
+            outputTime += clip.outputDuration
+        }
+
+        mappedTrack.sort { $0.time < $1.time }
+        mappedClicks.sort { $0.time < $1.time }
+        cursorTrack = mappedTrack
+        clickEvents = mappedClicks
+        refreshProcessedCursorTrack()
+    }
+
+    /// Inclusive start; end is exclusive for mid clips so a cut boundary sample
+    /// belongs to only one segment.
+    private func sourceTime(
+        _ time: Double,
+        isIn sourceStart: Double,
+        _ sourceEnd: Double,
+        includeEnd: Bool
+    ) -> Bool {
+        if time < sourceStart - 0.000_1 { return false }
+        if includeEnd {
+            return time <= sourceEnd + 0.000_1
+        }
+        return time < sourceEnd
     }
 
     /// Pixels per on-screen point for the recording (≈2 on Retina), so the
