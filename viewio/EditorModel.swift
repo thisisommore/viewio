@@ -354,6 +354,110 @@ final class EditorModel: ObservableObject {
         rebuildPreview(preservingPlayhead: true)
     }
 
+    /// True when the selected V1 segment can be removed (always keep at least one clip).
+    var canDeleteSelectedClip: Bool {
+        guard let selectedClipID else { return false }
+        return clips.count > 1 && clips.contains(where: { $0.id == selectedClipID })
+    }
+
+    /// Removes the selected V1 timeline segment and closes the gap.
+    func deleteSelectedClip() {
+        guard let selectedClipID else { return }
+        deleteClip(id: selectedClipID)
+    }
+
+    /// Removes a V1 timeline segment. Later segments slide left; zoom ranges are
+    /// remapped to the new output timeline. The last remaining clip cannot be deleted.
+    func deleteClip(id: UUID) {
+        guard clips.count > 1,
+              let index = clips.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let layouts = timelineClips
+        guard index < layouts.count else { return }
+        let layout = layouts[index]
+        let removedStart = layout.start
+        let removedEnd = layout.end
+        let removedDuration = layout.duration
+
+        clips.remove(at: index)
+        remapZoomRangesRemoving(from: removedStart, to: removedEnd)
+
+        if selectedClipID == id {
+            if index > 0 {
+                selectedClipID = clips[index - 1].id
+            } else {
+                selectedClipID = clips.first?.id
+            }
+        }
+        selectedZoomID = nil
+
+        // Keep the playhead on the join where the segment was removed.
+        if playhead >= removedEnd {
+            playhead = max(0, playhead - removedDuration)
+        } else if playhead > removedStart {
+            playhead = removedStart
+        }
+
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    /// Shifts / trims zoom ranges after a timeline segment is deleted.
+    private func remapZoomRangesRemoving(from removedStart: Double, to removedEnd: Double) {
+        let removedDuration = max(0, removedEnd - removedStart)
+        guard removedDuration > 0.000_1 else { return }
+
+        let minimumLength = 0.25
+        var remapped: [ZoomRange] = []
+        remapped.reserveCapacity(zoomRanges.count)
+
+        for range in zoomRanges {
+            // Entirely before the cut — unchanged.
+            if range.end <= removedStart + 0.000_1 {
+                remapped.append(range)
+                continue
+            }
+            // Entirely after the cut — shift left.
+            if range.start >= removedEnd - 0.000_1 {
+                var shifted = range
+                shifted.start = max(0, range.start - removedDuration)
+                shifted.end = max(shifted.start, range.end - removedDuration)
+                remapped.append(shifted)
+                continue
+            }
+
+            // Overlaps the deleted interval — keep only the surviving portion.
+            var start = range.start
+            var end = range.end
+            if start < removedStart && end > removedEnd {
+                // Spans the hole: close the gap.
+                end -= removedDuration
+            } else if start < removedStart {
+                // Left overhang only.
+                end = removedStart
+            } else if end > removedEnd {
+                // Right overhang only — lands at the join after the collapse.
+                start = removedStart
+                end -= removedDuration
+            } else {
+                // Fully inside the deleted segment.
+                continue
+            }
+
+            guard end - start >= minimumLength else { continue }
+            var trimmed = range
+            trimmed.start = max(0, start)
+            trimmed.end = end
+            remapped.append(trimmed)
+        }
+
+        // Drop selection if that zoom range was removed by the remap.
+        if let selectedZoomID, !remapped.contains(where: { $0.id == selectedZoomID }) {
+            self.selectedZoomID = nil
+        }
+        zoomRanges = remapped
+    }
+
     func selectClip(_ id: UUID) {
         selectedClipID = id
         selectedZoomID = nil

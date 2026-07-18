@@ -43,6 +43,19 @@ final class viewioTests: XCTestCase {
         model.setSpeed(2, for: secondClip.id)
         XCTAssertEqual(model.clips.last?.speed, 2)
 
+        // Deleting a V1 section removes it and keeps at least one clip.
+        let firstClipID = try XCTUnwrap(model.clips.first?.id)
+        model.selectClip(firstClipID)
+        XCTAssertTrue(model.canDeleteSelectedClip)
+        let durationBeforeDelete = model.duration
+        model.deleteSelectedClip()
+        XCTAssertEqual(model.clips.count, 1)
+        XCTAssertEqual(model.clips.first?.speed, 2)
+        XCTAssertLessThan(model.duration, durationBeforeDelete)
+        XCTAssertFalse(model.canDeleteSelectedClip)
+        model.deleteSelectedClip()
+        XCTAssertEqual(model.clips.count, 1, "The last V1 section must not be deleted.")
+
         model.playhead = 0.2
         model.addZoomRange()
         XCTAssertEqual(model.zoomRanges.count, 1)

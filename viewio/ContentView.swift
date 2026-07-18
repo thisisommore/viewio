@@ -783,6 +783,15 @@ private struct VideoPreview: View {
                 }
                 .help("Cut at playhead")
 
+                Button {
+                    model.deleteSelectedClip()
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .help("Delete selected V1 section")
+                .disabled(!model.canDeleteSelectedClip)
+                .keyboardShortcut(.delete, modifiers: [])
+
                 Spacer()
 
                 Text("\(formattedDuration(model.playhead)) / \(formattedDuration(model.duration))")
@@ -977,7 +986,7 @@ private struct ClipInspector: View {
             zoomHeader(range: range)
             zoomControls(for: range)
         } else if let selectedClip = model.selectedClip {
-            inspectorHeader(title: "CLIP INSPECTOR", subtitle: "Playback speed")
+            clipHeader(for: selectedClip)
             clipControls(for: selectedClip)
         } else {
             inspectorHeader(title: "CLIP INSPECTOR", subtitle: "Select a clip")
@@ -996,6 +1005,33 @@ private struct ClipInspector: View {
                 .foregroundStyle(.secondary)
             Text(subtitle)
                 .font(.system(size: 14, weight: .semibold))
+        }
+    }
+
+    @ViewBuilder
+    private func clipHeader(for selectedClip: EditClip) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("CLIP INSPECTOR")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.75)
+                    .foregroundStyle(.secondary)
+                Text("Playback speed")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            Spacer()
+            Button {
+                model.deleteClip(id: selectedClip.id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(model.canDeleteSelectedClip ? .red.opacity(0.85) : .secondary)
+            .disabled(!model.canDeleteSelectedClip)
+            .help(model.canDeleteSelectedClip
+                  ? "Delete this V1 section"
+                  : "Keep at least one section on the timeline")
         }
     }
 
@@ -1048,6 +1084,26 @@ private struct ClipInspector: View {
                 .foregroundStyle(.secondary)
             Text(formattedDuration(selectedClip.outputDuration))
                 .font(.system(size: 12, design: .monospaced))
+        }
+
+        if model.canDeleteSelectedClip {
+            Divider()
+
+            Button(role: .destructive) {
+                model.deleteClip(id: selectedClip.id)
+            } label: {
+                Label("Delete Section", systemImage: "trash")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+            .help("Remove this segment from the V1 timeline")
+        } else {
+            Divider()
+            Text("Cut the timeline to create sections you can delete.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1188,13 +1244,25 @@ private struct TimelineView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("TIMELINE")
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(0.75)
                     .foregroundStyle(.secondary)
 
                 Spacer()
+
+                if model.canDeleteSelectedClip {
+                    Button {
+                        model.deleteSelectedClip()
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.red.opacity(0.85))
+                    .help("Delete selected V1 section")
+                }
 
                 Text(formattedDuration(model.playhead))
                     .font(.system(size: 11, design: .monospaced))
