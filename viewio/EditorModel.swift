@@ -245,6 +245,25 @@ struct CursorTrailSample: Equatable {
     var opacity: Double
 }
 
+/// Point-in-time editor document for undo / redo (max 5 steps).
+private struct EditSnapshot: Equatable {
+    var clips: [EditClip]
+    var zoomRanges: [ZoomRange]
+    var selectedClipID: UUID?
+    var selectedZoomID: UUID?
+    var cursorSettings: CursorSettings
+    var motionBlurSettings: MotionBlurSettings
+    var cameraSettings: CameraSettings
+    var isBackgroundEnabled: Bool
+    var backgroundCornerRadius: Double
+    var backgroundPadding: Double
+    var musicURL: URL?
+    var musicVolume: Double
+    var isOriginalAudioMuted: Bool
+    var wallpaperID: String?
+    var isDirty: Bool
+}
+
 @MainActor
 final class EditorModel: ObservableObject {
     enum LoadState: Equatable {
@@ -270,6 +289,8 @@ final class EditorModel: ObservableObject {
     @Published private(set) var loadState: LoadState = .loading
     @Published private(set) var exportState: ExportState = .idle
     @Published private(set) var isDirty = false
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
     @Published private(set) var projectSaveError: String?
     @Published private(set) var duration: Double = 0
     @Published var playhead: Double = 0
@@ -354,6 +375,16 @@ final class EditorModel: ObservableObject {
     /// Edit document to apply after media finishes loading (project open).
     private var pendingDocument: ViewioProjectDocument?
 
+    // MARK: Undo / redo
+    private static let maxHistoryDepth = 5
+    /// Snapshot after the last committed edit (or load). Used so `markDirty`
+    /// can push the pre-edit state even though mutators change fields first.
+    private var lastCommittedSnapshot: EditSnapshot?
+    private var undoStack: [EditSnapshot] = []
+    private var redoStack: [EditSnapshot] = []
+    private var isApplyingUndoRedo = false
+    private var lastCheckpointTime: Date?
+
     init(sourceURL: URL, captureMode: CaptureMode = .display) {
         self.sourceURL = sourceURL
         self.captureMode = captureMode
@@ -428,9 +459,141 @@ final class EditorModel: ObservableObject {
     }
 
     private func markDirty() {
+        guard !isApplyingUndoRedo else { return }
+
+        // Mutators change state first, then call markDirty. Capture the
+        // pre-edit snapshot from `lastCommittedSnapshot` onto the undo stack.
+        if let previous = lastCommittedSnapshot {
+            let now = Date()
+            let coalescing = lastCheckpointTime.map { now.timeIntervalSince($0) < 0.4 } ?? false
+            if !coalescing {
+                if undoStack.last != previous {
+                    undoStack.append(previous)
+                    while undoStack.count > Self.maxHistoryDepth {
+                        undoStack.removeFirst()
+                    }
+                }
+                redoStack.removeAll(keepingCapacity: true)
+            }
+            lastCheckpointTime = now
+        }
+
         if !isDirty {
             isDirty = true
         }
+        lastCommittedSnapshot = makeEditSnapshot()
+        publishHistoryState()
+    }
+
+    func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        let current = makeEditSnapshot()
+        redoStack.append(current)
+        while redoStack.count > Self.maxHistoryDepth {
+            redoStack.removeFirst()
+        }
+        applyEditSnapshot(previous)
+        lastCommittedSnapshot = previous
+        lastCheckpointTime = nil
+        publishHistoryState()
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        let current = makeEditSnapshot()
+        undoStack.append(current)
+        while undoStack.count > Self.maxHistoryDepth {
+            undoStack.removeFirst()
+        }
+        applyEditSnapshot(next)
+        lastCommittedSnapshot = next
+        lastCheckpointTime = nil
+        publishHistoryState()
+    }
+
+    private func publishHistoryState() {
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    private func resetEditHistory() {
+        undoStack.removeAll(keepingCapacity: true)
+        redoStack.removeAll(keepingCapacity: true)
+        lastCheckpointTime = nil
+        lastCommittedSnapshot = makeEditSnapshot()
+        publishHistoryState()
+    }
+
+    private func makeEditSnapshot() -> EditSnapshot {
+        EditSnapshot(
+            clips: clips,
+            zoomRanges: zoomRanges,
+            selectedClipID: selectedClipID,
+            selectedZoomID: selectedZoomID,
+            cursorSettings: cursorSettings,
+            motionBlurSettings: motionBlurSettings,
+            cameraSettings: cameraSettings,
+            isBackgroundEnabled: isBackgroundEnabled,
+            backgroundCornerRadius: backgroundCornerRadius,
+            backgroundPadding: backgroundPadding,
+            musicURL: musicURL,
+            musicVolume: musicVolume,
+            isOriginalAudioMuted: isOriginalAudioMuted,
+            wallpaperID: wallpaperManager.selectedWallpaperID,
+            isDirty: isDirty
+        )
+    }
+
+    private func applyEditSnapshot(_ snapshot: EditSnapshot) {
+        isApplyingUndoRedo = true
+        defer { isApplyingUndoRedo = false }
+
+        clips = snapshot.clips
+        zoomRanges = snapshot.zoomRanges
+        selectedClipID = snapshot.selectedClipID
+        selectedZoomID = snapshot.selectedZoomID
+        cursorSettings = snapshot.cursorSettings
+        motionBlurSettings = snapshot.motionBlurSettings
+        cameraSettings = snapshot.cameraSettings
+        isBackgroundEnabled = snapshot.isBackgroundEnabled
+        backgroundCornerRadius = snapshot.backgroundCornerRadius
+        backgroundPadding = snapshot.backgroundPadding
+        musicVolume = snapshot.musicVolume
+        isOriginalAudioMuted = snapshot.isOriginalAudioMuted
+        isDirty = snapshot.isDirty
+
+        // Wallpaper: pause observation so selection doesn't create a new undo entry.
+        pauseWallpaperObservation()
+        if let id = snapshot.wallpaperID,
+           let wallpaper = wallpaperManager.wallpaper(withID: id) {
+            wallpaperManager.selectWallpaper(wallpaper)
+        }
+        observeWallpaperChanges()
+
+        saveCameraSettings()
+        refreshProcessedCursorTrack()
+
+        let musicTarget = snapshot.musicURL
+        if musicURL != musicTarget {
+            if let musicTarget {
+                Task { @MainActor in
+                    await self.loadMusic(from: musicTarget)
+                    self.rebuildTimelineCursorData()
+                    self.duration = self.timelineClips.last?.end ?? self.duration
+                    self.rebuildPreview(preservingPlayhead: true)
+                }
+                return
+            } else {
+                musicURL = nil
+                musicAsset = nil
+                musicSourceTrack = nil
+                musicError = nil
+            }
+        }
+
+        rebuildTimelineCursorData()
+        duration = timelineClips.last?.end ?? duration
+        rebuildPreview(preservingPlayhead: true)
     }
 
     deinit {
@@ -1285,6 +1448,8 @@ final class EditorModel: ObservableObject {
                 observeWallpaperChanges()
             }
             isDirty = false
+            lastCommittedSnapshot = makeEditSnapshot()
+            publishHistoryState()
             projectSaveError = nil
             Task {
                 await relinkSourceMedia()
@@ -1403,6 +1568,7 @@ final class EditorModel: ObservableObject {
         isDirty = false
         // Re-subscribe after restore; dropFirst ignores the restored selection.
         observeWallpaperChanges()
+        resetEditHistory()
     }
 
     private func loadMusic(from url: URL) async {
@@ -1659,6 +1825,7 @@ final class EditorModel: ObservableObject {
                 duration = seconds
                 loadState = .ready
                 rebuildPreview(preservingPlayhead: false)
+                resetEditHistory()
             }
 
             Task {

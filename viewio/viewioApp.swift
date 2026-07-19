@@ -103,6 +103,20 @@ struct viewioApp: App {
                 }
             }
 
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") {
+                    exportModel?.undo()
+                }
+                .keyboardShortcut("z")
+                .disabled(exportModel?.canUndo != true)
+
+                Button("Redo") {
+                    exportModel?.redo()
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(exportModel?.canRedo != true)
+            }
+
             CommandGroup(replacing: .saveItem) {
                 Button("Save Project") {
                     exportModel?.saveProject()
