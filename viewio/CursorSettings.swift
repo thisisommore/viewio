@@ -17,7 +17,7 @@ import SwiftUI
 
 // MARK: - Settings
 
-struct CursorSettings: Equatable {
+struct CursorSettings: Codable, Equatable {
     var isEnabled: Bool = true
     var style: CursorStyle = .macArrow
     var motion: CursorMotionStyle = .smooth
@@ -34,7 +34,7 @@ struct CursorSettings: Equatable {
 // MARK: - Style
 
 /// Built-in looks for the post-record cursor overlay.
-enum CursorStyle: String, CaseIterable, Identifiable {
+enum CursorStyle: String, Codable, CaseIterable, Identifiable {
     // macOS native (system PDF assets where available)
     case macArrow
     case macArrowBlack
@@ -146,7 +146,7 @@ enum CursorStyle: String, CaseIterable, Identifiable {
 
 // MARK: - Motion
 
-enum CursorMotionStyle: String, CaseIterable, Identifiable {
+enum CursorMotionStyle: String, Codable, CaseIterable, Identifiable {
     case precise
     case natural
     case smooth
@@ -196,7 +196,7 @@ enum CursorMotionStyle: String, CaseIterable, Identifiable {
 
 // MARK: - Click effect
 
-enum CursorClickEffect: String, CaseIterable, Identifiable {
+enum CursorClickEffect: String, Codable, CaseIterable, Identifiable {
     case none
     case ripple
     case ring

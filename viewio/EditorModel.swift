@@ -9,7 +9,7 @@ import Combine
 import Foundation
 import UniformTypeIdentifiers
 
-struct EditClip: Identifiable, Equatable {
+struct EditClip: Identifiable, Codable, Equatable {
     let id: UUID
     var sourceStart: Double
     var sourceEnd: Double
@@ -31,7 +31,7 @@ struct EditClip: Identifiable, Equatable {
     }
 }
 
-struct ZoomRange: Identifiable, Equatable {
+struct ZoomRange: Identifiable, Codable, Equatable {
     let id: UUID
     var start: Double
     var end: Double
@@ -72,7 +72,7 @@ struct ZoomRange: Identifiable, Equatable {
     }
 }
 
-enum ZoomAnimation: String, CaseIterable, Identifiable {
+enum ZoomAnimation: String, Codable, CaseIterable, Identifiable {
     case none
     case linear
     case easeIn
@@ -114,7 +114,7 @@ private extension ZoomAnimation {
 }
 
 /// Where the zoomed viewport places its focus, per zoom range.
-enum ZoomFocusMode: String, CaseIterable, Identifiable {
+enum ZoomFocusMode: String, Codable, CaseIterable, Identifiable {
     /// Magnify around the cursor wherever it is (default).
     case followCursor
     /// Pin the cursor to a chosen frame anchor (corner / edge / center).
@@ -134,7 +134,7 @@ enum ZoomFocusMode: String, CaseIterable, Identifiable {
 }
 
 /// Frame anchor for pinned zoom focus (3x3 pad).
-enum FocusAnchor: String, CaseIterable, Identifiable {
+enum FocusAnchor: String, Codable, CaseIterable, Identifiable {
     case topLeft, top, topRight
     case leading, center, trailing
     case bottomLeft, bottom, bottomRight
@@ -260,11 +260,17 @@ final class EditorModel: ObservableObject {
         case failed(String)
     }
 
-    let sourceURL: URL
+    private(set) var sourceURL: URL
+    /// Set when this session is backed by a saved `.viewioproj` package.
+    private(set) var projectURL: URL?
+    /// Called after a successful Save / Save As so the app can track the project.
+    var onProjectSaved: ((URL) -> Void)?
     let player = AVPlayer()
 
     @Published private(set) var loadState: LoadState = .loading
     @Published private(set) var exportState: ExportState = .idle
+    @Published private(set) var isDirty = false
+    @Published private(set) var projectSaveError: String?
     @Published private(set) var duration: Double = 0
     @Published var playhead: Double = 0
     @Published private(set) var clips: [EditClip] = []
@@ -345,12 +351,16 @@ final class EditorModel: ObservableObject {
     private var isSeeking = false
     private let wallpaperManager = WallpaperManager.shared
     private var wallpaperCancellable: AnyCancellable?
+    /// Edit document to apply after media finishes loading (project open).
+    private var pendingDocument: ViewioProjectDocument?
 
     init(sourceURL: URL, captureMode: CaptureMode = .display) {
         self.sourceURL = sourceURL
         self.captureMode = captureMode
         self.isBackgroundEnabled = (captureMode == .window)
         self.backgroundCornerRadius = 28
+        // Fresh recordings are unsaved projects until the user saves.
+        self.isDirty = true
         installTimeObserver()
         wallpaperManager.loadWallpapersIfNeeded()
         // Wallpaper choice is per recording — reset to the default so a
@@ -358,16 +368,68 @@ final class EditorModel: ObservableObject {
         if let first = wallpaperManager.wallpapers.first {
             wallpaperManager.selectWallpaper(first)
         }
+        observeWallpaperChanges()
+        Task {
+            await loadSource()
+        }
+    }
+
+    /// Opens a saved `.viewioproj` package with media + edit settings.
+    init(projectURL: URL) {
+        do {
+            let loaded = try ViewioProject.load(from: projectURL)
+            self.sourceURL = loaded.mediaURL
+            self.projectURL = loaded.projectURL
+            self.captureMode = loaded.document.captureMode
+            self.isBackgroundEnabled = loaded.document.isBackgroundEnabled
+            self.backgroundCornerRadius = loaded.document.backgroundCornerRadius
+            self.backgroundPadding = loaded.document.backgroundPadding
+            self.musicVolume = loaded.document.musicVolume
+            self.isOriginalAudioMuted = loaded.document.isOriginalAudioMuted
+            self.pendingDocument = loaded.document
+            self.isDirty = false
+            installTimeObserver()
+            wallpaperManager.loadWallpapersIfNeeded()
+            observeWallpaperChanges()
+            Task {
+                await loadSource()
+            }
+        } catch {
+            self.sourceURL = projectURL
+            self.projectURL = projectURL
+            self.captureMode = .display
+            self.isBackgroundEnabled = false
+            self.backgroundCornerRadius = 28
+            self.isDirty = false
+            self.loadState = .failed(error.localizedDescription)
+            installTimeObserver()
+        }
+    }
+
+    private func observeWallpaperChanges() {
         wallpaperCancellable = wallpaperManager.$selectedWallpaperID
+            .removeDuplicates()
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.rebuildPreview(preservingPlayhead: true)
+                    guard let self else { return }
+                    self.markDirty()
+                    self.rebuildPreview(preservingPlayhead: true)
                 }
             }
-        Task {
-            await loadSource()
+    }
+
+    /// Stops listening for wallpaper selection so programmatic restores don't
+    /// count as user edits (publisher delivers asynchronously on the main queue).
+    private func pauseWallpaperObservation() {
+        wallpaperCancellable?.cancel()
+        wallpaperCancellable = nil
+    }
+
+    private func markDirty() {
+        if !isDirty {
+            isDirty = true
         }
     }
 
@@ -402,7 +464,17 @@ final class EditorModel: ObservableObject {
     }
 
     var clipTitle: String {
-        sourceURL.deletingPathExtension().lastPathComponent
+        let base: String
+        if let projectURL {
+            base = projectURL.deletingPathExtension().lastPathComponent
+        } else {
+            base = sourceURL.deletingPathExtension().lastPathComponent
+        }
+        return isDirty ? "\(base)*" : base
+    }
+
+    var canSaveProject: Bool {
+        loadState == .ready
     }
 
     func togglePlayback() {
@@ -459,6 +531,7 @@ final class EditorModel: ObservableObject {
         )
         clips.replaceSubrange(clipIndex...clipIndex, with: [left, right])
         selectedClipID = right.id
+        markDirty()
         rebuildTimelineCursorData()
         rebuildPreview(preservingPlayhead: true)
     }
@@ -494,6 +567,7 @@ final class EditorModel: ObservableObject {
         // Drop cursor/click samples that lived only in the deleted source range
         // and retime the rest onto the new composition timeline.
         rebuildTimelineCursorData()
+        markDirty()
 
         if selectedClipID == id {
             if index > 0 {
@@ -678,6 +752,7 @@ final class EditorModel: ObservableObject {
             newOutputDuration: newOutputDuration
         )
 
+        markDirty()
         rebuildTimelineCursorData()
         rebuildPreview(preservingPlayhead: true)
     }
@@ -688,6 +763,7 @@ final class EditorModel: ObservableObject {
         let end = min(duration, start + min(3.2, max(0.8, duration)))
         zoomRanges.append(ZoomRange(start: start, end: end))
         selectedZoomID = zoomRanges.last?.id
+        markDirty()
         refreshZoomVideoComposition()
     }
 
@@ -698,42 +774,49 @@ final class EditorModel: ObservableObject {
         updated.start = min(max(0, range.start), max(0, duration - minimumLength))
         updated.end = min(duration, max(updated.start + minimumLength, range.end))
         zoomRanges[index] = updated
+        markDirty()
         refreshZoomVideoComposition()
     }
 
     func setZoomAmount(_ amount: Double, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].amount = min(3, max(1, amount))
+        markDirty()
         refreshZoomVideoComposition()
     }
 
     func setZoomEntryAnimation(_ animation: ZoomAnimation, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].entryAnimation = animation
+        markDirty()
         refreshZoomVideoComposition()
     }
 
     func setZoomExitAnimation(_ animation: ZoomAnimation, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].exitAnimation = animation
+        markDirty()
         refreshZoomVideoComposition()
     }
 
     func setZoomFocusMode(_ mode: ZoomFocusMode, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].focusMode = mode
+        markDirty()
         refreshZoomVideoComposition()
     }
 
     func setZoomFocusAnchor(_ anchor: FocusAnchor, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].focusAnchor = anchor
+        markDirty()
         refreshZoomVideoComposition()
     }
 
     func setZoomFocusPadding(_ padding: Double, for id: UUID) {
         guard let index = zoomRanges.firstIndex(where: { $0.id == id }) else { return }
         zoomRanges[index].focusPadding = min(0.25, max(0, padding))
+        markDirty()
         refreshZoomVideoComposition()
     }
 
@@ -743,6 +826,7 @@ final class EditorModel: ObservableObject {
             x: min(1, max(0, point.x)),
             y: min(1, max(0, point.y))
         )
+        markDirty()
         refreshZoomVideoComposition()
     }
 
@@ -751,6 +835,7 @@ final class EditorModel: ObservableObject {
         if selectedZoomID == id {
             selectedZoomID = nil
         }
+        markDirty()
         refreshZoomVideoComposition()
     }
 
@@ -759,6 +844,7 @@ final class EditorModel: ObservableObject {
         var settings = cursorSettings
         settings.isEnabled = enabled
         cursorSettings = settings
+        markDirty()
         // Preview uses a UI overlay; export bakes the cursor offline.
     }
 
@@ -767,6 +853,7 @@ final class EditorModel: ObservableObject {
         var settings = cameraSettings
         settings.isEnabled = enabled
         cameraSettings = settings
+        markDirty()
         saveCameraSettings()
         rebuildPreview(preservingPlayhead: true)
     }
@@ -774,6 +861,7 @@ final class EditorModel: ObservableObject {
     func setBackgroundEnabled(_ enabled: Bool) {
         guard isBackgroundEnabled != enabled else { return }
         isBackgroundEnabled = enabled
+        markDirty()
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -781,6 +869,7 @@ final class EditorModel: ObservableObject {
         let clamped = min(120, max(0, radius))
         guard abs(backgroundCornerRadius - clamped) > 0.001 else { return }
         backgroundCornerRadius = clamped
+        markDirty()
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -788,6 +877,7 @@ final class EditorModel: ObservableObject {
         let clamped = min(0.3, max(0, padding))
         guard abs(backgroundPadding - clamped) > 0.0001 else { return }
         backgroundPadding = clamped
+        markDirty()
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -813,6 +903,7 @@ final class EditorModel: ObservableObject {
             musicSourceTrack = track
             musicURL = url
             musicError = nil
+            markDirty()
             rebuildPreview(preservingPlayhead: true)
         }
     }
@@ -823,6 +914,7 @@ final class EditorModel: ObservableObject {
         musicAsset = nil
         musicSourceTrack = nil
         musicError = nil
+        markDirty()
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -830,12 +922,14 @@ final class EditorModel: ObservableObject {
         let clamped = min(1, max(0, volume))
         guard abs(musicVolume - clamped) > 0.001 else { return }
         musicVolume = clamped
+        markDirty()
         refreshAudioMix()
     }
 
     func setOriginalAudioMuted(_ muted: Bool) {
         guard isOriginalAudioMuted != muted else { return }
         isOriginalAudioMuted = muted
+        markDirty()
         refreshAudioMix()
     }
 
@@ -871,6 +965,7 @@ final class EditorModel: ObservableObject {
         var settings = cameraSettings
         settings.corner = corner
         cameraSettings = settings
+        markDirty()
         saveCameraSettings()
         rebuildPreview(preservingPlayhead: true)
     }
@@ -881,6 +976,7 @@ final class EditorModel: ObservableObject {
         var settings = cameraSettings
         settings.size = clamped
         cameraSettings = settings
+        markDirty()
         saveCameraSettings()
         rebuildPreview(preservingPlayhead: true)
     }
@@ -890,6 +986,7 @@ final class EditorModel: ObservableObject {
         var settings = cursorSettings
         settings.style = style
         cursorSettings = settings
+        markDirty()
     }
 
     func setCursorMotion(_ motion: CursorMotionStyle) {
@@ -897,6 +994,7 @@ final class EditorModel: ObservableObject {
         var settings = cursorSettings
         settings.motion = motion
         cursorSettings = settings
+        markDirty()
         refreshProcessedCursorTrack()
         // Motion also drives zoom focus, so rebuild the player composition.
         rebuildPreview(preservingPlayhead: true)
@@ -908,6 +1006,7 @@ final class EditorModel: ObservableObject {
         var settings = cursorSettings
         settings.size = clamped
         cursorSettings = settings
+        markDirty()
     }
 
     func setCursorClickEffect(_ effect: CursorClickEffect) {
@@ -915,6 +1014,7 @@ final class EditorModel: ObservableObject {
         var settings = cursorSettings
         settings.clickEffect = effect
         cursorSettings = settings
+        markDirty()
     }
 
     func setCursorHideWhenTyping(_ enabled: Bool) {
@@ -922,6 +1022,7 @@ final class EditorModel: ObservableObject {
         var settings = cursorSettings
         settings.hideWhenTyping = enabled
         cursorSettings = settings
+        markDirty()
         // Preview reads segments live; export passes them via CursorRenderData.
     }
 
@@ -930,6 +1031,7 @@ final class EditorModel: ObservableObject {
         var settings = motionBlurSettings
         settings.isEnabled = enabled
         motionBlurSettings = settings
+        markDirty()
         // Zoom blur is baked into the video composition.
         if settings.applyToZoom {
             rebuildPreview(preservingPlayhead: true)
@@ -942,6 +1044,7 @@ final class EditorModel: ObservableObject {
         var settings = motionBlurSettings
         settings.amount = clamped
         motionBlurSettings = settings
+        markDirty()
         if settings.isEnabled, settings.applyToZoom {
             rebuildPreview(preservingPlayhead: true)
         }
@@ -952,6 +1055,7 @@ final class EditorModel: ObservableObject {
         var settings = motionBlurSettings
         settings.applyToCursor = enabled
         motionBlurSettings = settings
+        markDirty()
         // Cursor trail is a live overlay — no composition rebuild.
     }
 
@@ -960,6 +1064,7 @@ final class EditorModel: ObservableObject {
         var settings = motionBlurSettings
         settings.applyToZoom = enabled
         motionBlurSettings = settings
+        markDirty()
         if settings.isEnabled {
             rebuildPreview(preservingPlayhead: true)
         }
@@ -1027,6 +1132,7 @@ final class EditorModel: ObservableObject {
             clickEvents: clickEvents
         )
         selectedZoomID = zoomRanges.first?.id
+        markDirty()
         rebuildPreview(preservingPlayhead: true)
     }
 
@@ -1086,12 +1192,230 @@ final class EditorModel: ObservableObject {
         let panel = NSSavePanel()
         panel.title = "Export Video"
         panel.message = "Choose where to save the edited recording."
-        panel.nameFieldStringValue = "\(clipTitle) Edited.mp4"
+        panel.nameFieldStringValue = "\(exportBaseTitle) Edited.mp4"
         panel.allowedContentTypes = [.mpeg4Movie]
         panel.canCreateDirectories = true
 
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
         export(to: outputURL)
+    }
+
+    private var exportBaseTitle: String {
+        if let projectURL {
+            return projectURL.deletingPathExtension().lastPathComponent
+        }
+        return sourceURL.deletingPathExtension().lastPathComponent
+    }
+
+    // MARK: - Project save / load
+
+    func saveProject() {
+        guard canSaveProject else { return }
+        if let projectURL {
+            performSave(to: projectURL)
+        } else {
+            saveProjectAs()
+        }
+    }
+
+    func saveProjectAs() {
+        guard canSaveProject else { return }
+        let panel = NSSavePanel()
+        panel.title = "Save Project"
+        panel.message = "Save this recording and all edit settings as a viewio project."
+        panel.nameFieldStringValue = "\(exportBaseTitle).\(ViewioProject.pathExtension)"
+        panel.allowedContentTypes = [.viewioProject]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let projectURL = url.pathExtension.lowercased() == ViewioProject.pathExtension
+            ? url
+            : url.appendingPathExtension(ViewioProject.pathExtension)
+        performSave(to: projectURL)
+    }
+
+    func dismissProjectSaveError() {
+        projectSaveError = nil
+    }
+
+    private func performSave(to projectURL: URL) {
+        do {
+            let wallpaperRef = currentWallpaperRef()
+            let customWallpaper = currentCustomWallpaper()
+            var document = ViewioProjectDocument(
+                version: ViewioProjectDocument.currentVersion,
+                captureMode: captureMode,
+                clips: clips,
+                zoomRanges: zoomRanges,
+                cursorSettings: cursorSettings,
+                motionBlurSettings: motionBlurSettings,
+                cameraSettings: cameraSettings,
+                isBackgroundEnabled: isBackgroundEnabled,
+                backgroundCornerRadius: backgroundCornerRadius,
+                backgroundPadding: backgroundPadding,
+                wallpaper: wallpaperRef,
+                musicRelativePath: nil,
+                musicVolume: musicVolume,
+                isOriginalAudioMuted: isOriginalAudioMuted
+            )
+
+            document = try ViewioProject.save(
+                to: projectURL,
+                sourceMediaURL: sourceURL,
+                document: document,
+                musicSourceURL: musicURL,
+                customWallpaperURL: customWallpaper?.localURL,
+                customWallpaperID: customWallpaper?.id
+            )
+
+            self.projectURL = projectURL
+            sourceURL = ViewioProject.screenMediaURL(in: projectURL)
+            if let relative = document.musicRelativePath {
+                musicURL = projectURL.appendingPathComponent(relative)
+            }
+            if case let .custom(relativePath, id) = document.wallpaper {
+                let url = projectURL.appendingPathComponent(relativePath)
+                // Pause observation so the async wallpaper publisher can't re-dirty
+                // a project we just saved.
+                pauseWallpaperObservation()
+                wallpaperManager.restoreProjectWallpaper(
+                    bundledID: nil,
+                    customURL: url,
+                    customID: id
+                )
+                observeWallpaperChanges()
+            }
+            isDirty = false
+            projectSaveError = nil
+            Task {
+                await relinkSourceMedia()
+                onProjectSaved?(projectURL)
+            }
+        } catch {
+            projectSaveError = error.localizedDescription
+        }
+    }
+
+    /// Rebinds AVAssets to `sourceURL` after a project save (media may have moved).
+    private func relinkSourceMedia() async {
+        let asset = AVURLAsset(url: sourceURL)
+        do {
+            let videoTracks = try await asset.loadTracks(withMediaType: .video)
+            let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+            guard let videoTrack = videoTracks.first else { return }
+            sourceAsset = asset
+            sourceVideoTrack = videoTrack
+            sourceAudioTracks = audioTracks
+            sourceCursorTrack = loadCursorTrack()
+            sourceClickEvents = loadClickEvents()
+            sourceKeyEvents = loadKeyEvents()
+            hasCursorData = !sourceCursorTrack.isEmpty
+            hasKeyData = !sourceKeyEvents.isEmpty
+            let camera = await loadCameraTrack()
+            cameraAsset = camera.0
+            cameraVideoTrack = camera.1
+            cameraDuration = camera.2
+            cameraNaturalSize = camera.3
+            cameraPreferredTransform = camera.4
+            // Keep editor cameraSettings; sidecar was just written from them.
+            hasCameraVideo = camera.1 != nil
+            if let musicURL {
+                await loadMusic(from: musicURL)
+            }
+            rebuildTimelineCursorData()
+            rebuildPreview(preservingPlayhead: true)
+        } catch {
+            // Keep playing previous in-memory composition if relink fails.
+        }
+    }
+
+    private func currentWallpaperRef() -> ProjectWallpaperRef? {
+        guard let id = wallpaperManager.selectedWallpaperID,
+              let wallpaper = wallpaperManager.wallpaper(withID: id) else {
+            return nil
+        }
+        if let resourceURL = Bundle.main.resourceURL,
+           wallpaper.localURL.standardizedFileURL.path.hasPrefix(resourceURL.standardizedFileURL.path) {
+            return .bundled(id: id)
+        }
+        return .custom(relativePath: "", id: id)
+    }
+
+    private func currentCustomWallpaper() -> WallpaperManager.Wallpaper? {
+        guard let id = wallpaperManager.selectedWallpaperID,
+              let wallpaper = wallpaperManager.wallpaper(withID: id) else {
+            return nil
+        }
+        if case .custom = currentWallpaperRef() {
+            return wallpaper
+        }
+        return nil
+    }
+
+    private func applyProjectDocument(_ document: ViewioProjectDocument) async {
+        // Pause wallpaper observation for the whole restore. `$selectedWallpaperID`
+        // delivers on the next main-queue turn; if we only briefly suppress dirty,
+        // that late delivery marks a freshly opened project as edited.
+        pauseWallpaperObservation()
+
+        clips = document.clips.isEmpty
+            ? clips
+            : document.clips
+        selectedClipID = clips.first?.id
+        zoomRanges = document.zoomRanges
+        selectedZoomID = zoomRanges.first?.id
+        cursorSettings = document.cursorSettings
+        motionBlurSettings = document.motionBlurSettings
+        cameraSettings = document.cameraSettings
+        isBackgroundEnabled = document.isBackgroundEnabled
+        backgroundCornerRadius = document.backgroundCornerRadius
+        backgroundPadding = document.backgroundPadding
+        musicVolume = document.musicVolume
+        isOriginalAudioMuted = document.isOriginalAudioMuted
+
+        if let projectURL {
+            switch document.wallpaper {
+            case let .bundled(id):
+                wallpaperManager.restoreProjectWallpaper(
+                    bundledID: id,
+                    customURL: nil,
+                    customID: nil
+                )
+            case let .custom(relativePath, id):
+                let url = projectURL.appendingPathComponent(relativePath)
+                wallpaperManager.restoreProjectWallpaper(
+                    bundledID: nil,
+                    customURL: url,
+                    customID: id
+                )
+            case nil:
+                break
+            }
+
+            if let relative = document.musicRelativePath {
+                let url = projectURL.appendingPathComponent(relative)
+                await loadMusic(from: url)
+            }
+        }
+
+        rebuildTimelineCursorData()
+        duration = timelineClips.last?.end ?? duration
+        rebuildPreview(preservingPlayhead: false)
+        isDirty = false
+        // Re-subscribe after restore; dropFirst ignores the restored selection.
+        observeWallpaperChanges()
+    }
+
+    private func loadMusic(from url: URL) async {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .audio).first else {
+            musicError = "Couldn’t load the project music file."
+            return
+        }
+        musicAsset = asset
+        musicSourceTrack = track
+        musicURL = url
+        musicError = nil
     }
 
     func export(to outputURL: URL) {
@@ -1301,26 +1625,41 @@ final class EditorModel: ObservableObject {
             sourceKeyEvents = loadKeyEvents()
             hasCursorData = !sourceCursorTrack.isEmpty
             hasKeyData = !sourceKeyEvents.isEmpty
-            // Default custom cursor on when we have track data (system cursor is hidden on record).
-            var settings = cursorSettings
-            settings.isEnabled = hasCursorData
-            cursorSettings = settings
 
             (cameraAsset, cameraVideoTrack, cameraDuration, cameraNaturalSize, cameraPreferredTransform, cameraSettings) = await loadCameraTrack()
             hasCameraVideo = cameraVideoTrack != nil
 
-            // Detect the window corner radius from black pixels at the corners.
-            if captureMode == .window,
-               let detectedRadius = await detectWindowCornerRadius(asset: asset) {
-                backgroundCornerRadius = detectedRadius
-            }
+            if let document = pendingDocument {
+                pendingDocument = nil
+                // Default cursor enablement before applying saved settings.
+                var settings = cursorSettings
+                settings.isEnabled = hasCursorData
+                cursorSettings = settings
+                clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
+                selectedClipID = clips.first?.id
+                rebuildTimelineCursorData()
+                duration = seconds
+                loadState = .ready
+                await applyProjectDocument(document)
+            } else {
+                // Default custom cursor on when we have track data (system cursor is hidden on record).
+                var settings = cursorSettings
+                settings.isEnabled = hasCursorData
+                cursorSettings = settings
 
-            clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
-            selectedClipID = clips.first?.id
-            rebuildTimelineCursorData()
-            duration = seconds
-            loadState = .ready
-            rebuildPreview(preservingPlayhead: false)
+                // Detect the window corner radius from black pixels at the corners.
+                if captureMode == .window,
+                   let detectedRadius = await detectWindowCornerRadius(asset: asset) {
+                    backgroundCornerRadius = detectedRadius
+                }
+
+                clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
+                selectedClipID = clips.first?.id
+                rebuildTimelineCursorData()
+                duration = seconds
+                loadState = .ready
+                rebuildPreview(preservingPlayhead: false)
+            }
 
             Task {
                 await generateTimelineThumbnails(asset: asset, duration: seconds)

@@ -7,9 +7,11 @@ import AppKit
 import AVKit
 @preconcurrency import ScreenCaptureKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var recorder: RecordingController
+    @EnvironmentObject private var unsavedChanges: UnsavedChangesGuard
 
     var body: some View {
         Group {
@@ -53,7 +55,11 @@ struct ContentView: View {
 
             case let .finished(url):
                 EditorWorkspace(sourceURL: url, captureMode: recorder.captureMode)
-                    .id(url)
+                    .id("editing")
+
+            case let .project(url):
+                EditorWorkspace(projectURL: url)
+                    .id("editing")
 
             case let .failed(message):
                 RecordingStartView(
@@ -69,14 +75,61 @@ struct ContentView: View {
         .animation(.snappy(duration: 0.28), value: recorder.isRecording)
         .frame(minWidth: 960, minHeight: 650)
         .background(Color(nsColor: .windowBackgroundColor))
-        .alert("Discard This Recording?", isPresented: $recorder.showsDiscardRecordingConfirmation) {
-            Button("Discard Recording", role: .destructive) {
+        .background(WindowCloseGuardInstaller(guardObject: unsavedChanges))
+        .onChange(of: recorder.state) { _, newState in
+            switch newState {
+            case .finished, .project:
+                break
+            default:
+                unsavedChanges.updateDirty(false)
+            }
+        }
+        .alert(discardAlertTitle, isPresented: $recorder.showsDiscardRecordingConfirmation) {
+            Button(discardConfirmTitle, role: .destructive) {
                 recorder.discardRecording()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The recording and any edits you've made will be permanently deleted.")
+            Text(discardAlertMessage)
         }
+        .alert("Project Not Saved", isPresented: $unsavedChanges.showsAlert) {
+            Button("Discard", role: .destructive) {
+                unsavedChanges.discard()
+            }
+            Button("Cancel", role: .cancel) {
+                unsavedChanges.cancel()
+            }
+        } message: {
+            Text(unsavedCloseMessage)
+        }
+    }
+
+    private var unsavedCloseMessage: String {
+        if case .project = recorder.state {
+            return "You have unsaved changes. Discard them and close, or cancel to keep editing."
+        }
+        return "This recording hasn’t been saved as a project. Discard it and close, or cancel to keep editing."
+    }
+
+    private var discardAlertTitle: String {
+        if case .project = recorder.state {
+            return "Close This Project?"
+        }
+        return "Discard This Recording?"
+    }
+
+    private var discardConfirmTitle: String {
+        if case .project = recorder.state {
+            return "Close Project"
+        }
+        return "Discard Recording"
+    }
+
+    private var discardAlertMessage: String {
+        if case .project = recorder.state {
+            return "Unsaved changes will be lost. The project file on disk will not be deleted."
+        }
+        return "The recording and any unsaved edits will be permanently deleted. Save as a project first if you want to keep them."
     }
 }
 
@@ -127,6 +180,12 @@ private struct RecordingStartView: View {
 
                 Spacer(minLength: 0)
 
+                Button("Open Project…") {
+                    openProject()
+                }
+                .controlSize(.large)
+                .disabled(isPreparing)
+
                 Button("Start Recording", action: onRecord)
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
@@ -137,6 +196,18 @@ private struct RecordingStartView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
         }
+    }
+
+    private func openProject() {
+        let panel = NSOpenPanel()
+        panel.title = "Open Project"
+        panel.message = "Choose a viewio project to continue editing."
+        panel.allowedContentTypes = [.viewioProject]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        recorder.openProject(url)
     }
 
     /// One-line recap of the current setup shown next to the Start button.
@@ -614,10 +685,16 @@ private struct RecordingProgressView: View {
 }
 
 private struct EditorWorkspace: View {
+    @EnvironmentObject private var recorder: RecordingController
+    @EnvironmentObject private var unsavedChanges: UnsavedChangesGuard
     @StateObject private var model: EditorModel
 
     init(sourceURL: URL, captureMode: CaptureMode = .display) {
         _model = StateObject(wrappedValue: EditorModel(sourceURL: sourceURL, captureMode: captureMode))
+    }
+
+    init(projectURL: URL) {
+        _model = StateObject(wrappedValue: EditorModel(projectURL: projectURL))
     }
 
     var body: some View {
@@ -642,6 +719,28 @@ private struct EditorWorkspace: View {
         }
         .navigationTitle(model.clipTitle)
         .focusedSceneValue(\.exportModel, model)
+        .onAppear {
+            model.onProjectSaved = { [weak recorder] url in
+                recorder?.adoptSavedProject(url)
+            }
+            unsavedChanges.updateDirty(model.isDirty)
+        }
+        .onChange(of: model.isDirty) { _, dirty in
+            unsavedChanges.updateDirty(dirty)
+        }
+        .onDisappear {
+            unsavedChanges.updateDirty(false)
+        }
+        .alert("Couldn’t Save Project", isPresented: Binding(
+            get: { model.projectSaveError != nil },
+            set: { if !$0 { model.dismissProjectSaveError() } }
+        )) {
+            Button("OK", role: .cancel) {
+                model.dismissProjectSaveError()
+            }
+        } message: {
+            Text(model.projectSaveError ?? "")
+        }
         .overlay {
             ExportOverlay(state: model.exportState, dismiss: model.dismissExportMessage)
         }

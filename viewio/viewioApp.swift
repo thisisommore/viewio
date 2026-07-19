@@ -5,7 +5,9 @@
 //  Created by Om More on 12/07/26.
 //
 
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Lets the File menu reach the EditorModel of the currently focused window.
 private struct ExportModelFocusedKey: FocusedValueKey {
@@ -19,10 +21,20 @@ extension FocusedValues {
     }
 }
 
+final class ViewioAppDelegate: NSObject, NSApplicationDelegate {
+    var unsavedChanges: UnsavedChangesGuard?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        unsavedChanges?.handleApplicationShouldTerminate() ?? .terminateNow
+    }
+}
+
 @main
 struct viewioApp: App {
+    @NSApplicationDelegateAdaptor(ViewioAppDelegate.self) private var appDelegate
     @StateObject private var recorder = RecordingController()
     @StateObject private var wallpaperManager = WallpaperManager.shared
+    @StateObject private var unsavedChanges = UnsavedChangesGuard()
     @FocusedValue(\.exportModel) private var exportModel
 
     var body: some Scene {
@@ -33,6 +45,13 @@ struct viewioApp: App {
             ContentView()
                 .environmentObject(recorder)
                 .environmentObject(wallpaperManager)
+                .environmentObject(unsavedChanges)
+                .onAppear {
+                    appDelegate.unsavedChanges = unsavedChanges
+                    unsavedChanges.onDiscard = { [weak recorder] in
+                        recorder?.discardRecording()
+                    }
+                }
         }
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -40,9 +59,31 @@ struct viewioApp: App {
                     recorder.requestNewRecording()
                 }
                 .keyboardShortcut("n")
-                .disabled(!isEditingRecording)
+                .disabled(!isEditing)
             }
-            CommandGroup(after: .saveItem) {
+            CommandGroup(replacing: .saveItem) {
+                Button("Save Project") {
+                    exportModel?.saveProject()
+                }
+                .keyboardShortcut("s")
+                .disabled(exportModel == nil || exportModel?.canSaveProject != true)
+
+                Button("Save Project As…") {
+                    exportModel?.saveProjectAs()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(exportModel == nil || exportModel?.canSaveProject != true)
+
+                Divider()
+
+                Button("Open Project…") {
+                    openProject()
+                }
+                .keyboardShortcut("o")
+                .disabled(!canOpenProject)
+
+                Divider()
+
                 Button("Export…") {
                     exportModel?.export()
                 }
@@ -82,13 +123,34 @@ struct viewioApp: App {
         switch recorder.state {
         case .preparing, .recording:
             true
-        case .idle, .stopping, .failed, .finished:
+        case .idle, .stopping, .failed, .finished, .project:
             false
         }
     }
 
-    private var isEditingRecording: Bool {
-        if case .finished = recorder.state { return true }
+    private var isEditing: Bool {
+        switch recorder.state {
+        case .finished, .project:
+            true
+        default:
+            false
+        }
+    }
+
+    private var canOpenProject: Bool {
+        if case .idle = recorder.state { return true }
         return false
+    }
+
+    private func openProject() {
+        let panel = NSOpenPanel()
+        panel.title = "Open Project"
+        panel.message = "Choose a viewio project to continue editing."
+        panel.allowedContentTypes = [.viewioProject]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        recorder.openProject(url)
     }
 }

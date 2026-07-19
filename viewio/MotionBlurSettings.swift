@@ -8,7 +8,7 @@
 import CoreGraphics
 import Foundation
 
-struct MotionBlurSettings: Equatable {
+struct MotionBlurSettings: Codable, Equatable {
     /// Master switch.
     var isEnabled: Bool = false
     /// 0 = none, 1 = strong smear.

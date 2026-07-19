@@ -40,7 +40,7 @@ struct WindowInfo: Identifiable, Equatable {
     var idValue: UInt32 { id }
 }
 
-enum CaptureMode: String, CaseIterable, Identifiable {
+enum CaptureMode: String, Codable, CaseIterable, Identifiable {
     case display
     case window
 
@@ -190,6 +190,8 @@ final class RecordingController: NSObject, ObservableObject {
         case stopping
         case failed(String)
         case finished(URL)
+        /// Editing a saved `.viewioproj` package.
+        case project(URL)
     }
 
     @Published private(set) var state: State = .idle
@@ -260,7 +262,7 @@ final class RecordingController: NSObject, ObservableObject {
         switch state {
         case .preparing, .recording, .stopping:
             true
-        case .idle, .failed, .finished:
+        case .idle, .failed, .finished, .project:
             false
         }
     }
@@ -473,17 +475,46 @@ final class RecordingController: NSObject, ObservableObject {
     /// Asks for confirmation before discarding a finished recording; the
     /// alert lives in ContentView and calls `discardRecording()` on confirm.
     func requestNewRecording() {
-        guard case .finished = state else { return }
-        showsDiscardRecordingConfirmation = true
+        switch state {
+        case .finished, .project:
+            showsDiscardRecordingConfirmation = true
+        default:
+            break
+        }
     }
 
-    /// Deletes a finished recording and returns to the new-recording setup UI.
+    /// Deletes a finished recording (or closes a project without deleting it)
+    /// and returns to the new-recording setup UI.
     func discardRecording() {
-        if case let .finished(url) = state {
+        switch state {
+        case let .finished(url):
             removeRecordingFiles(at: url)
+        case .project:
+            break
+        default:
+            break
         }
         resetCaptureReferences()
         state = .idle
+    }
+
+    /// Opens a saved project from the idle screen.
+    func openProject(_ url: URL) {
+        guard case .idle = state else { return }
+        state = .project(url)
+    }
+
+    /// After Save Project from a fresh recording, switch to project mode and
+    /// remove the temporary Application Support capture files.
+    func adoptSavedProject(_ projectURL: URL) {
+        if case let .finished(mediaURL) = state {
+            // Only delete App Support temps — never a file already inside the project.
+            let projectPath = projectURL.standardizedFileURL.path
+            if !mediaURL.standardizedFileURL.path.hasPrefix(projectPath) {
+                removeRecordingFiles(at: mediaURL)
+            }
+        }
+        state = .project(projectURL)
     }
 
     /// Stops the live stream (if any) after a discard request. Finish callbacks

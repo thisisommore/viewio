@@ -2,7 +2,43 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>NSAccessibilityUsageDescription</key>
-    <string>viewio detects when you type during a recording so the cursor can be hidden while typing in the video. Only keystroke timing is captured — never which keys you press.</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>viewio detects when you type during a recording so the cursor can be hidden while typing in the video. Only keystroke timing is captured — never which keys you press.</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>viewio Project</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>app.viewio.project</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>com.apple.package</string>
+				<string>public.composite-content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>viewio Project</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.viewio.project</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>viewioproj</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

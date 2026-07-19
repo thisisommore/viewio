@@ -40,6 +40,38 @@ final class WallpaperManager: ObservableObject {
         lastError = nil
     }
 
+    /// Restores a wallpaper when opening a project (bundled id or custom file).
+    /// Only publishes when the selection actually changes.
+    func restoreProjectWallpaper(bundledID: String?, customURL: URL?, customID: String?) {
+        loadWallpapersIfNeeded()
+        if let customURL, let customID, FileManager.default.fileExists(atPath: customURL.path) {
+            if let existing = wallpapers.first(where: { $0.id == customID }) {
+                setSelectedWallpaperIDIfNeeded(existing.id)
+                return
+            }
+            let wallpaper = Wallpaper(
+                id: customID,
+                name: customURL.deletingPathExtension().lastPathComponent,
+                localURL: customURL
+            )
+            wallpapers.append(wallpaper)
+            setSelectedWallpaperIDIfNeeded(wallpaper.id)
+            return
+        }
+        if let bundledID, wallpapers.contains(where: { $0.id == bundledID }) {
+            setSelectedWallpaperIDIfNeeded(bundledID)
+            return
+        }
+        if let first = wallpapers.first {
+            setSelectedWallpaperIDIfNeeded(first.id)
+        }
+    }
+
+    private func setSelectedWallpaperIDIfNeeded(_ id: String) {
+        guard selectedWallpaperID != id else { return }
+        selectedWallpaperID = id
+    }
+
     func wallpaper(withID id: String) -> Wallpaper? {
         wallpapers.first { $0.id == id }
     }
