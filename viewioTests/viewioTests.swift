@@ -83,6 +83,107 @@ final class viewioTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: exportURL.path))
     }
 
+    func testSpeedChangeScalesZoomRangesWithClip() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let sourceURL = directory.appendingPathComponent("source.mp4")
+        try await makeTestVideo(at: sourceURL)
+
+        let model = EditorModel(sourceURL: sourceURL)
+        try await waitUntil {
+            if case .ready = model.loadState {
+                true
+            } else {
+                false
+            }
+        }
+
+        let originalDuration = model.duration
+        XCTAssertGreaterThan(originalDuration, 0.5)
+
+        // Place a zoom over the middle of the single clip (explicit times).
+        model.playhead = 0
+        model.addZoomRange()
+        let zoomID = try XCTUnwrap(model.zoomRanges.first?.id)
+        let zoomStart = originalDuration * 0.2
+        let zoomEnd = originalDuration * 0.8
+        model.updateZoomRange(ZoomRange(id: zoomID, start: zoomStart, end: zoomEnd))
+        let zoom = try XCTUnwrap(model.zoomRanges.first)
+        XCTAssertEqual(zoom.start, zoomStart, accuracy: 0.02)
+        XCTAssertEqual(zoom.end, zoomEnd, accuracy: 0.02)
+        let zoomLength = zoom.end - zoom.start
+
+        let clipID = try XCTUnwrap(model.clips.first?.id)
+        model.setSpeed(2, for: clipID)
+
+        XCTAssertEqual(try XCTUnwrap(model.clips.first).speed, 2, accuracy: 0.001)
+        XCTAssertEqual(model.duration, originalDuration / 2, accuracy: 0.05)
+
+        let scaled = try XCTUnwrap(model.zoomRanges.first)
+        // Zoom times should compress with the clip (2x speed → half duration).
+        XCTAssertEqual(scaled.start, zoomStart / 2, accuracy: 0.05)
+        XCTAssertEqual(scaled.end, zoomEnd / 2, accuracy: 0.05)
+        XCTAssertEqual(scaled.end - scaled.start, zoomLength / 2, accuracy: 0.05)
+        XCTAssertLessThanOrEqual(scaled.end, model.duration + 0.02)
+    }
+
+    func testSpeedChangeOnLaterClipShiftsTrailingZoom() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let sourceURL = directory.appendingPathComponent("source.mp4")
+        try await makeTestVideo(at: sourceURL)
+
+        let model = EditorModel(sourceURL: sourceURL)
+        try await waitUntil {
+            if case .ready = model.loadState {
+                true
+            } else {
+                false
+            }
+        }
+
+        // Cut so we have two clips; zoom only on the second.
+        model.playhead = model.duration * 0.5
+        model.cutAtPlayhead()
+        XCTAssertEqual(model.clips.count, 2)
+
+        let secondLayout = try XCTUnwrap(model.timelineClips.last)
+        model.addZoomRange()
+        let zoomID = try XCTUnwrap(model.zoomRanges.first?.id)
+        let oldZoomStart = secondLayout.start + secondLayout.duration * 0.2
+        let oldZoomEnd = secondLayout.start + secondLayout.duration * 0.8
+        model.updateZoomRange(ZoomRange(id: zoomID, start: oldZoomStart, end: oldZoomEnd))
+        let zoom = try XCTUnwrap(model.zoomRanges.first)
+        XCTAssertEqual(zoom.start, oldZoomStart, accuracy: 0.02)
+
+        let secondClipID = try XCTUnwrap(model.clips.last?.id)
+        let oldSecondStart = secondLayout.start
+        let oldSecondDuration = secondLayout.duration
+
+        model.setSpeed(2, for: secondClipID)
+
+        let newSecond = try XCTUnwrap(model.timelineClips.last)
+        XCTAssertEqual(newSecond.start, oldSecondStart, accuracy: 0.02)
+        XCTAssertEqual(newSecond.duration, oldSecondDuration / 2, accuracy: 0.05)
+
+        let scaled = try XCTUnwrap(model.zoomRanges.first)
+        // Relative position inside the second clip should be preserved at half length.
+        let oldRelStart = oldZoomStart - oldSecondStart
+        let oldRelEnd = oldZoomEnd - oldSecondStart
+        XCTAssertEqual(scaled.start, oldSecondStart + oldRelStart / 2, accuracy: 0.05)
+        XCTAssertEqual(scaled.end, oldSecondStart + oldRelEnd / 2, accuracy: 0.05)
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 8,
         condition: @escaping @MainActor () -> Bool

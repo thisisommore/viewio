@@ -570,6 +570,76 @@ final class EditorModel: ObservableObject {
         zoomRanges = remapped
     }
 
+    /// Maps a composition-timeline time through a single clip's speed change.
+    /// Times inside the clip scale with its output duration; times after it shift
+    /// by the duration delta so later segments stay locked to their source.
+    private func mapOutputTimeForSpeedChange(
+        _ time: Double,
+        clipStart: Double,
+        oldOutputDuration: Double,
+        newOutputDuration: Double
+    ) -> Double {
+        guard oldOutputDuration > 0.000_1 else { return max(0, time) }
+        let scale = newOutputDuration / oldOutputDuration
+        if abs(scale - 1) < 0.000_1 { return max(0, time) }
+
+        let oldClipEnd = clipStart + oldOutputDuration
+        let durationDelta = newOutputDuration - oldOutputDuration
+
+        if time <= clipStart + 0.000_1 {
+            return max(0, time)
+        }
+        if time >= oldClipEnd - 0.000_1 {
+            return max(0, time + durationDelta)
+        }
+        return max(0, clipStart + (time - clipStart) * scale)
+    }
+
+    /// Scales / shifts zoom ranges when a clip's speed changes so zooms stay
+    /// attached to the same source content (they shrink when you speed up, etc.).
+    private func remapZoomRangesForSpeedChange(
+        clipStart: Double,
+        oldOutputDuration: Double,
+        newOutputDuration: Double
+    ) {
+        guard oldOutputDuration > 0.000_1 else { return }
+        let scale = newOutputDuration / oldOutputDuration
+        guard abs(scale - 1) >= 0.000_1 else { return }
+
+        // Match composition filtering: keep very short scaled zooms (high speed).
+        let minimumLength = 0.08
+        var remapped: [ZoomRange] = []
+        remapped.reserveCapacity(zoomRanges.count)
+
+        for range in zoomRanges {
+            var start = mapOutputTimeForSpeedChange(
+                range.start,
+                clipStart: clipStart,
+                oldOutputDuration: oldOutputDuration,
+                newOutputDuration: newOutputDuration
+            )
+            var end = mapOutputTimeForSpeedChange(
+                range.end,
+                clipStart: clipStart,
+                oldOutputDuration: oldOutputDuration,
+                newOutputDuration: newOutputDuration
+            )
+            if end < start {
+                swap(&start, &end)
+            }
+            guard end - start >= minimumLength else { continue }
+            var updated = range
+            updated.start = start
+            updated.end = end
+            remapped.append(updated)
+        }
+
+        if let selectedZoomID, !remapped.contains(where: { $0.id == selectedZoomID }) {
+            self.selectedZoomID = nil
+        }
+        zoomRanges = remapped
+    }
+
     func selectClip(_ id: UUID) {
         selectedClipID = id
         selectedZoomID = nil
@@ -582,7 +652,32 @@ final class EditorModel: ObservableObject {
 
     func setSpeed(_ speed: Double, for clipID: UUID) {
         guard let index = clips.firstIndex(where: { $0.id == clipID }) else { return }
-        clips[index].speed = speed
+        let newSpeed = max(0.001, speed)
+        let oldSpeed = max(0.001, clips[index].speed)
+        guard abs(newSpeed - oldSpeed) > 0.000_1 else { return }
+
+        // Capture pre-change layout so zoom (and playhead) can retime with the clip.
+        let layouts = timelineClips
+        guard index < layouts.count else { return }
+        let layout = layouts[index]
+        let clipStart = layout.start
+        let oldOutputDuration = layout.duration
+        let newOutputDuration = clips[index].sourceDuration / newSpeed
+
+        clips[index].speed = newSpeed
+        remapZoomRangesForSpeedChange(
+            clipStart: clipStart,
+            oldOutputDuration: oldOutputDuration,
+            newOutputDuration: newOutputDuration
+        )
+        // Keep the playhead on the same source frame after retime.
+        playhead = mapOutputTimeForSpeedChange(
+            playhead,
+            clipStart: clipStart,
+            oldOutputDuration: oldOutputDuration,
+            newOutputDuration: newOutputDuration
+        )
+
         rebuildTimelineCursorData()
         rebuildPreview(preservingPlayhead: true)
     }
