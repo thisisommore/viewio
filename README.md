@@ -8,17 +8,17 @@
 
 ---
 
-## Demo - export with zoom
+## Demo
 
-Real export from viewio - cinematic zoom on the edited take.
+Product walkthrough — capture, edit, and export with cinematic zoom.
 
 <p align="center">
-  <img src="docs/demo/export-zoom-demo.gif" alt="Export zoom demo - autoplays in README" width="900" />
+  <img src="docs/demo/demo.gif" alt="viewio demo - autoplays in README" width="900" />
 </p>
 
 <p align="center">
-  <a href="docs/demo/export-zoom-demo.mp4">Download MP4</a>
-  · GIF autoplays in the README · full clip also in <code>docs/demo/</code>
+  <a href="docs/demo/demo.mp4">Download MP4</a>
+  · GIF autoplays in the README · source in <code>docs/demo/</code>
 </p>
 
 ---
@@ -63,7 +63,7 @@ Cut, zoom, restyle the cursor, and drop in a background - without leaving the ap
 
 ![Editor](docs/screenshots/editor.png)
 
-See also the **[export zoom demo](docs/demo/export-zoom-demo.mp4)** above for the post-export look with cinematic zoom.
+See also the **[demo](docs/demo/demo.mp4)** above for the full product walkthrough.
 
 ---
 
@@ -130,8 +130,8 @@ viewio/
 ├── docs/
 │   ├── screenshots/        # new-recording.png, editor.png
 │   └── demo/
-│       ├── export-zoom-demo.gif   # Autoplays in README
-│       └── export-zoom-demo.mp4   # Full quality download
+│       ├── demo.gif   # Autoplays in README
+│       └── demo.mp4   # Full quality download
 ├── BUILD.md                # Release / notarization pipeline
 └── viewio.xcodeproj
 ```

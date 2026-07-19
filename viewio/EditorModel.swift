@@ -404,11 +404,16 @@ final class EditorModel: ObservableObject {
     private var redoStack: [EditSnapshot] = []
     private var isApplyingUndoRedo = false
 
+    /// Used when auto-detection fails or is unavailable (not the slider max).
+    private static let fallbackWindowCornerRadius: Double = 38
+
     init(sourceURL: URL, captureMode: CaptureMode = .display) {
         self.sourceURL = sourceURL
         self.captureMode = captureMode
         self.isBackgroundEnabled = (captureMode == .window)
-        self.backgroundCornerRadius = 28
+        self.backgroundCornerRadius = captureMode == .window
+            ? Self.fallbackWindowCornerRadius
+            : 28
         // Fresh recordings are unsaved projects until the user saves.
         self.isDirty = true
         installTimeObserver()
@@ -449,7 +454,7 @@ final class EditorModel: ObservableObject {
             self.projectURL = projectURL
             self.captureMode = .display
             self.isBackgroundEnabled = false
-            self.backgroundCornerRadius = 28
+            self.backgroundCornerRadius = Self.fallbackWindowCornerRadius
             self.isDirty = false
             self.loadState = .failed(error.localizedDescription)
             installTimeObserver()
@@ -1777,7 +1782,10 @@ final class EditorModel: ObservableObject {
 
         var radii: [Double] = []
         let threshold: UInt8 = 30
-        let maxDistance = min(200, min(width, height) / 2)
+        // Cap the scan so a failed/full-black corner never maps to a huge radius.
+        let maxDistance = min(80, min(width, height) / 2)
+        // Reject detections that are effectively "maxed out" or implausibly large.
+        let maxAcceptedRadius = 80.0
 
         for (start, step) in corners {
             var x = start.0
@@ -1797,14 +1805,21 @@ final class EditorModel: ObservableObject {
                 distance += 1
             }
             // Along a diagonal, the black quarter-circle extends to ~0.293 * radius.
+            // Hitting maxDistance means we never found content — treat as failed corner.
             if distance > 2, distance < maxDistance {
-                radii.append(Double(distance) / 0.293)
+                let radius = Double(distance) / 0.293
+                if radius <= maxAcceptedRadius {
+                    radii.append(radius)
+                }
             }
         }
 
         guard !radii.isEmpty else { return nil }
         radii.sort()
-        return radii[radii.count / 2]
+        let median = radii[radii.count / 2]
+        // Final guard: never return a near-max bogus reading to the editor.
+        guard median >= 4, median <= maxAcceptedRadius else { return nil }
+        return median
     }
 
     private func loadSource() async {
@@ -1855,9 +1870,14 @@ final class EditorModel: ObservableObject {
                 cursorSettings = settings
 
                 // Detect the window corner radius from black pixels at the corners.
-                if captureMode == .window,
-                   let detectedRadius = await detectWindowCornerRadius(asset: asset) {
-                    backgroundCornerRadius = detectedRadius
+                // On failure use a modest fallback — never the slider max (120),
+                // which over-rounds the window and is rarely correct.
+                if captureMode == .window {
+                    if let detectedRadius = await detectWindowCornerRadius(asset: asset) {
+                        backgroundCornerRadius = detectedRadius
+                    } else {
+                        backgroundCornerRadius = Self.fallbackWindowCornerRadius
+                    }
                 }
 
                 clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
