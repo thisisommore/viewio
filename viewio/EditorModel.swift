@@ -2049,7 +2049,12 @@ final class EditorModel: ObservableObject {
             if let range = zoomRanges.first(where: { time + 0.0001 >= $0.start && time <= $0.end + 0.0001 }) {
                 let length = max(0.001, range.end - range.start)
                 let transition = transitionDuration(for: range, totalDuration: length)
-                scale = zoomScale(at: time, range: range, transition: transition)
+                scale = zoomScale(
+                    at: time,
+                    range: range,
+                    transition: transition,
+                    compositionDuration: duration
+                )
                 let cursorFocus = zoomFocus(at: time, in: range)
                 // The sample's focus is the zoom pivot (zoom-blur epicenter).
                 focus = range.focusMode == .fixedPoint ? range.fixedFocusPoint : cursorFocus
@@ -2314,17 +2319,30 @@ final class EditorModel: ObservableObject {
         return min(desired, max(0.12, totalDuration / 2.4))
     }
 
-    private func zoomScale(at time: Double, range: ZoomRange, transition: Double) -> CGFloat {
+    private func zoomScale(
+        at time: Double,
+        range: ZoomRange,
+        transition: Double,
+        compositionDuration: Double
+    ) -> CGFloat {
         let amount = CGFloat(min(3, max(1, range.amount)))
         let relativeTime = time - range.start
-        let rangeDuration = range.end - range.start
+        let rangeDuration = max(0.001, range.end - range.start)
 
-        if relativeTime < transition {
-            let progress = transition > 0 ? relativeTime / transition : 1
+        // When a zoom is pinned to the timeline start, there is no pre-zoom
+        // content to ease in from — hold full zoom from frame 0.
+        // When pinned to the end, hold full zoom through the last frame.
+        let pinEntry = range.start <= 0.001
+        let pinExit = range.end >= compositionDuration - 0.001
+        let entryTransition = pinEntry ? 0 : transition
+        let exitTransition = pinExit ? 0 : transition
+
+        if entryTransition > 0, relativeTime < entryTransition {
+            let progress = relativeTime / entryTransition
             let eased = range.entryAnimation.progress(at: progress)
             return 1 + (amount - 1) * CGFloat(eased)
-        } else if relativeTime > rangeDuration - transition {
-            let progress = transition > 0 ? (rangeDuration - relativeTime) / transition : 1
+        } else if exitTransition > 0, relativeTime > rangeDuration - exitTransition {
+            let progress = (rangeDuration - relativeTime) / exitTransition
             let eased = range.exitAnimation.progress(at: progress)
             return 1 + (amount - 1) * CGFloat(eased)
         } else {
@@ -2426,9 +2444,15 @@ final class EditorModel: ObservableObject {
         range: ZoomRange,
         transition: Double,
         baseTransform: CGAffineTransform,
-        renderSize: CGSize
+        renderSize: CGSize,
+        compositionDuration: Double
     ) -> CGAffineTransform {
-        let scale = zoomScale(at: time, range: range, transition: transition)
+        let scale = zoomScale(
+            at: time,
+            range: range,
+            transition: transition,
+            compositionDuration: compositionDuration
+        )
         let center = cursorPosition(at: time)
         let zoom = zoomTransform(
             renderSize: renderSize,
