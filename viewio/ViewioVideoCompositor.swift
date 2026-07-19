@@ -179,26 +179,20 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
 
     func startRequest(_ request: AVAsynchronousVideoCompositionRequest) {
         autoreleasepool {
-            print("CamDebug compositor startRequest time=\(request.compositionTime.seconds), sourceTrackIDs=\(request.sourceTrackIDs)")
             guard let instruction = request.videoCompositionInstruction as? ViewioCompositionInstruction else {
-                print("CamDebug compositor bad instruction")
                 request.finish(with: CompositorError.badInstruction)
                 return
             }
 
             guard let sourceBuffer = request.sourceFrame(byTrackID: instruction.sourceTrackID) else {
-                print("CamDebug compositor missing source frame for track \(instruction.sourceTrackID)")
                 request.finish(with: CompositorError.missingFrame)
                 return
             }
-            print("CamDebug compositor got screen buffer \(CVPixelBufferGetWidth(sourceBuffer))x\(CVPixelBufferGetHeight(sourceBuffer))")
 
             guard let outputBuffer = request.renderContext.newPixelBuffer() else {
-                print("CamDebug compositor failed to allocate output buffer")
                 request.finish(with: CompositorError.noOutputBuffer)
                 return
             }
-            print("CamDebug compositor allocated output buffer")
 
             let seconds = request.compositionTime.seconds
             let sample = instruction.sample(at: seconds)
@@ -257,18 +251,14 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
 
             // Composite the camera picture-in-picture on top (if present).
             if let cameraTrackID = instruction.cameraTrackID,
-               let cameraTransform = instruction.cameraTransform {
-                if let cameraBuffer = request.sourceFrame(byTrackID: cameraTrackID) {
-                    print("CamDebug compositor got camera buffer \(CVPixelBufferGetWidth(cameraBuffer))x\(CVPixelBufferGetHeight(cameraBuffer))")
-                    var cameraImage = CIImage(cvPixelBuffer: cameraBuffer)
-                    // The camera transform is already in Core Image bottom-left space.
-                    cameraImage = cameraImage.transformed(by: cameraTransform)
-                    image = cameraImage.composited(over: image).cropped(
-                        to: CGRect(origin: .zero, size: render)
-                    )
-                } else {
-                    print("CamDebug compositor missing camera frame for track \(cameraTrackID)")
-                }
+               let cameraTransform = instruction.cameraTransform,
+               let cameraBuffer = request.sourceFrame(byTrackID: cameraTrackID) {
+                var cameraImage = CIImage(cvPixelBuffer: cameraBuffer)
+                // The camera transform is already in Core Image bottom-left space.
+                cameraImage = cameraImage.transformed(by: cameraTransform)
+                image = cameraImage.composited(over: image).cropped(
+                    to: CGRect(origin: .zero, size: render)
+                )
             }
 
             // Draw the tracked cursor last, on top of everything. The cursor is
@@ -311,7 +301,6 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
                 kCVImageBufferTransferFunction_ITU_R_709_2,
                 .shouldPropagate
             )
-            print("CamDebug compositor rendered frame")
             request.finish(withComposedVideoFrame: outputBuffer)
         }
     }

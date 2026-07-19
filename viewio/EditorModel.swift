@@ -367,6 +367,10 @@ final class EditorModel: ObservableObject {
     private var cameraNaturalSize: CGSize = .zero
     private var cameraPreferredTransform: CGAffineTransform = .identity
     private var timeObserver: Any?
+    /// Independent of AVPlayer's periodic observer — that observer often stalls
+    /// under ScreenCaptureKit / IOSurface pressure while frames still render,
+    /// which freezes the SwiftUI cursor overlay (driven by `playhead`).
+    private var playheadPollTimer: Timer?
     private var exportSession: AVAssetExportSession?
     private var exportProgressTimer: Timer?
     private var isSeeking = false
@@ -597,6 +601,7 @@ final class EditorModel: ObservableObject {
     }
 
     deinit {
+        playheadPollTimer?.invalidate()
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
         }
@@ -641,15 +646,17 @@ final class EditorModel: ObservableObject {
     }
 
     func togglePlayback() {
-        if player.timeControlStatus == .playing {
+        if player.timeControlStatus == .playing || player.rate > 0 {
             player.pause()
             isPlaying = false
+            stopPlayheadPolling()
         } else {
             if playhead >= duration - 0.01 {
                 seek(to: 0)
             }
             player.play()
             isPlaying = true
+            startPlayheadPolling()
         }
     }
 
@@ -661,9 +668,17 @@ final class EditorModel: ObservableObject {
             to: CMTime(seconds: clamped, preferredTimescale: 600),
             toleranceBefore: .zero,
             toleranceAfter: .zero
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.isSeeking = false
+        ) { [weak self] finished in
+            // Seek completion can arrive while screen capture is starving the
+            // cooperative MainActor queue — prefer a direct main hop.
+            DispatchQueue.main.async {
+                guard let self else { return }
+                MainActor.assumeIsolated {
+                    self.isSeeking = false
+                    if finished {
+                        self.syncPlayheadFromPlayer()
+                    }
+                }
             }
         }
     }
@@ -1894,6 +1909,7 @@ final class EditorModel: ObservableObject {
         videoRenderSize = build.renderSize
         playhead = previousPlayhead
         isPlaying = false
+        stopPlayheadPolling()
         player.pause()
 
         if previousPlayhead > 0 {
@@ -2030,7 +2046,6 @@ final class EditorModel: ObservableObject {
             compositionMusicTrackID = musicTrack.trackID
         }
 
-        print("CamDebug composition tracks: screen segments=\(compositionVideoTrack.segments.count), camera segments=\(compositionCameraTrack?.segments.count ?? 0)")
         let videoComposition = makeVideoComposition(
             compositionTrack: compositionVideoTrack,
             cameraTrack: compositionCameraTrack,
@@ -2107,9 +2122,6 @@ final class EditorModel: ObservableObject {
 
         let zoomBlur = motionBlurSettings.zoomStrength
         let includeCamera = cameraTrack != nil && cameraSettings.isEnabled
-        print("CamDebug makeVideoComposition renderSize=\(renderSize), frameDuration=\(videoComposition.frameDuration), includeCamera=\(includeCamera), cameraSettings.enabled=\(cameraSettings.isEnabled)")
-        print("CamDebug source formatDescriptions=\(sourceTrack.formatDescriptions)")
-        print("CamDebug camera formatDescriptions=\(cameraVideoTrack?.formatDescriptions ?? [])")
 
         var cameraTransform: CGAffineTransform?
         if includeCamera {
@@ -2738,10 +2750,9 @@ final class EditorModel: ObservableObject {
     }
 
     private func installTimeObserver() {
-        // Callback is already scheduled on the main queue. Update playhead
-        // synchronously — wrapping in `Task { @MainActor }` deferred updates
-        // behind recording's cursor sampling and froze the overlay while video
-        // (AVPlayer) kept playing.
+        // Best-effort: AVFoundation may stop delivering these under GPU/IOSurface
+        // pressure (e.g. recording another window while previewing). Polling is
+        // the reliable path for the cursor overlay.
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 1.0 / 30.0, preferredTimescale: 600),
             queue: .main
@@ -2749,11 +2760,49 @@ final class EditorModel: ObservableObject {
             guard let self else { return }
             let seconds = time.seconds
             MainActor.assumeIsolated {
-                guard !self.isSeeking else { return }
-                guard seconds.isFinite else { return }
-                self.playhead = min(self.duration, max(0, seconds))
-                self.isPlaying = self.player.timeControlStatus == .playing
+                self.syncPlayheadFromPlayer(seconds: seconds)
             }
+        }
+    }
+
+    private func startPlayheadPolling() {
+        guard playheadPollTimer == nil else { return }
+        // `.common` keeps the cursor moving during tracking loops and while
+        // ScreenCaptureKit / recording timers dominate the default mode.
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.syncPlayheadFromPlayer()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        playheadPollTimer = timer
+    }
+
+    private func stopPlayheadPolling() {
+        playheadPollTimer?.invalidate()
+        playheadPollTimer = nil
+    }
+
+    /// Reads `AVPlayer.currentTime()` so the overlay stays live even when
+    /// `addPeriodicTimeObserver` stalls (common while another window records).
+    private func syncPlayheadFromPlayer(seconds: Double? = nil) {
+        guard !isSeeking else { return }
+        let t = seconds ?? player.currentTime().seconds
+        guard t.isFinite else { return }
+        let next = min(duration, max(0, t))
+        if abs(playhead - next) > 0.000_8 {
+            playhead = next
+        }
+
+        let playing = player.timeControlStatus == .playing || player.rate > 0.01
+        if isPlaying != playing {
+            isPlaying = playing
+        }
+        if playing {
+            startPlayheadPolling()
+        } else {
+            stopPlayheadPolling()
         }
     }
 }

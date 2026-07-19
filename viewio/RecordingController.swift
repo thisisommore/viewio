@@ -240,7 +240,8 @@ final class RecordingController: NSObject, ObservableObject {
     private var overlayWindow: CameraOverlayWindowController?
     private var startedAt: Date?
     private var timer: Timer?
-    private var cursorTimer: Timer?
+    private var cursorSampleSource: DispatchSourceTimer?
+    private let cursorSampleQueue = DispatchQueue(label: "app.viewio.cursor-sample", qos: .userInteractive)
     private var cursorEventMonitor: Any?
     private var keyEventMonitor: Any?
     /// Thread-safe buffer so global mouse/key monitors don't flood MainActor
@@ -963,15 +964,17 @@ final class RecordingController: NSObject, ObservableObject {
         let bounds = captureBounds
         cursorBuffer.begin(hostStart: hostStart, bounds: bounds)
 
-        // Sample cursor at least as often as capture FPS (capped for overhead).
+        // Sample off the main run loop. A main-thread Timer at 60Hz plus
+        // ScreenCaptureKit contended with AVPlayer and froze editor playhead
+        // updates (video still drew; SwiftUI cursor overlay did not).
         let cursorHz = min(60.0, max(30.0, Double(selectedFrameRate.rawValue)))
-        // Main run loop + common modes so tracking continues during UI tracking loops.
-        // Work stays in the buffer (lock-based) so we never enqueue MainActor Tasks.
-        let timer = Timer(timeInterval: 1.0 / cursorHz, repeats: true) { [weak self] _ in
+        let source = DispatchSource.makeTimerSource(queue: cursorSampleQueue)
+        source.schedule(deadline: .now(), repeating: 1.0 / cursorHz, leeway: .milliseconds(2))
+        source.setEventHandler { [weak self] in
             self?.cursorBuffer.sampleMouse()
         }
-        RunLoop.main.add(timer, forMode: .common)
-        cursorTimer = timer
+        source.resume()
+        cursorSampleSource = source
         // Polling alone can be a frame late while the pointer is moving. Listen
         // to the real global mouse events as well, so the track contains the
         // exact position and timestamp used for a move or click.
@@ -995,12 +998,15 @@ final class RecordingController: NSObject, ObservableObject {
             self?.cursorBuffer.recordKeyEvent(event)
         }
         // Immediate sample at t≈0 so the first frame is aligned.
-        cursorBuffer.sampleMouse()
+        cursorSampleQueue.async { [weak self] in
+            self?.cursorBuffer.sampleMouse()
+        }
     }
 
     private func stopCursorTracking() {
-        cursorTimer?.invalidate()
-        cursorTimer = nil
+        cursorSampleSource?.setEventHandler {}
+        cursorSampleSource?.cancel()
+        cursorSampleSource = nil
         if let cursorEventMonitor {
             NSEvent.removeMonitor(cursorEventMonitor)
             self.cursorEventMonitor = nil
