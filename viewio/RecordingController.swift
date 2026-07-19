@@ -183,6 +183,9 @@ struct KeyEvent: Codable, Equatable {
 
 @MainActor
 final class RecordingController: NSObject, ObservableObject {
+    /// Which controller last presented the shared system content picker.
+    private static weak var activePickerClient: RecordingController?
+
     enum State: Equatable {
         case idle
         case preparing
@@ -304,6 +307,11 @@ final class RecordingController: NSObject, ObservableObject {
 
     func startRecording() {
         guard !isRecording else { return }
+        // Screen capture + global input monitors are single-owner in practice.
+        if ViewioSessionRegistry.shared.isRecordingElsewhere(than: self) {
+            state = .failed("Another window is already recording. Stop that recording first.")
+            return
+        }
 
         discardRequested = false
         isDiscarding = false
@@ -403,6 +411,7 @@ final class RecordingController: NSObject, ObservableObject {
     /// Presents the native macOS content picker (live display/window thumbnails).
     /// The choice is mapped back onto `captureMode` + selection IDs in `applyPickedFilter`.
     func presentContentPicker() {
+        Self.activePickerClient = self
         let picker = SCContentSharingPicker.shared
         // The daemon rejects present() unless the picker is in the active state.
         picker.isActive = true
@@ -415,6 +424,13 @@ final class RecordingController: NSObject, ObservableObject {
         configuration.allowedPickerModes = [.singleDisplay, .singleWindow]
         picker.configuration = configuration
         picker.add(self)
+    }
+
+    deinit {
+        // Timers / picker cleanup: RecordingController lives on the main actor;
+        // window teardown also runs there for StateObject.
+        accessibilityTimer?.invalidate()
+        SCContentSharingPicker.shared.remove(self)
     }
 
     /// Records exactly what the user picked in the system picker. The legacy
@@ -1279,13 +1295,20 @@ extension RecordingController: SCContentSharingPickerObserver {
     nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
         Task { @MainActor [weak self] in
             picker.isActive = false
-            await self?.applyPickedFilter(filter)
+            guard let self else { return }
+            // Shared picker notifies every observer — only the presenter applies.
+            guard Self.activePickerClient === self else { return }
+            Self.activePickerClient = nil
+            await self.applyPickedFilter(filter)
         }
     }
 
     nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
             picker.isActive = false
+            if let self, Self.activePickerClient === self {
+                Self.activePickerClient = nil
+            }
         }
     }
 
