@@ -19,6 +19,16 @@ private struct RecordingControllerFocusedKey: FocusedValueKey {
     typealias Value = RecordingController
 }
 
+/// Scene-scoped so Edit → Undo/Redo re-enables when history changes
+/// (App does not observe EditorModel's @Published flags directly).
+private struct EditorCanUndoKey: FocusedValueKey {
+    typealias Value = Bool
+}
+
+private struct EditorCanRedoKey: FocusedValueKey {
+    typealias Value = Bool
+}
+
 extension FocusedValues {
     var exportModel: EditorModel? {
         get { self[ExportModelFocusedKey.self] }
@@ -28,6 +38,16 @@ extension FocusedValues {
     var recordingController: RecordingController? {
         get { self[RecordingControllerFocusedKey.self] }
         set { self[RecordingControllerFocusedKey.self] = newValue }
+    }
+
+    var editorCanUndo: Bool? {
+        get { self[EditorCanUndoKey.self] }
+        set { self[EditorCanUndoKey.self] = newValue }
+    }
+
+    var editorCanRedo: Bool? {
+        get { self[EditorCanRedoKey.self] }
+        set { self[EditorCanRedoKey.self] = newValue }
     }
 }
 
@@ -74,6 +94,8 @@ struct viewioApp: App {
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.exportModel) private var exportModel
     @FocusedValue(\.recordingController) private var focusedRecorder
+    @FocusedValue(\.editorCanUndo) private var editorCanUndo
+    @FocusedValue(\.editorCanRedo) private var editorCanRedo
 
     var body: some Scene {
         // Multi-window: each WindowGroup instance owns its own recorder +
@@ -108,13 +130,15 @@ struct viewioApp: App {
                     exportModel?.undo()
                 }
                 .keyboardShortcut("z")
-                .disabled(exportModel?.canUndo != true)
+                // Use scene-focused Bools (updated whenever history changes),
+                // not exportModel?.canUndo — App never observes the model object.
+                .disabled(exportModel == nil || editorCanUndo != true)
 
                 Button("Redo") {
                     exportModel?.redo()
                 }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
-                .disabled(exportModel?.canRedo != true)
+                .disabled(exportModel == nil || editorCanRedo != true)
             }
 
             CommandGroup(replacing: .saveItem) {

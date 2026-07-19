@@ -262,6 +262,22 @@ private struct EditSnapshot: Equatable {
     var isOriginalAudioMuted: Bool
     var wallpaperID: String?
     var isDirty: Bool
+
+    /// Equality for edit content only (ignore dirty flag / selection chrome).
+    func editContentEquals(_ other: EditSnapshot) -> Bool {
+        clips == other.clips
+            && zoomRanges == other.zoomRanges
+            && cursorSettings == other.cursorSettings
+            && motionBlurSettings == other.motionBlurSettings
+            && cameraSettings == other.cameraSettings
+            && isBackgroundEnabled == other.isBackgroundEnabled
+            && abs(backgroundCornerRadius - other.backgroundCornerRadius) < 0.000_1
+            && abs(backgroundPadding - other.backgroundPadding) < 0.000_1
+            && musicURL == other.musicURL
+            && abs(musicVolume - other.musicVolume) < 0.000_1
+            && isOriginalAudioMuted == other.isOriginalAudioMuted
+            && wallpaperID == other.wallpaperID
+    }
 }
 
 @MainActor
@@ -387,7 +403,6 @@ final class EditorModel: ObservableObject {
     private var undoStack: [EditSnapshot] = []
     private var redoStack: [EditSnapshot] = []
     private var isApplyingUndoRedo = false
-    private var lastCheckpointTime: Date?
 
     init(sourceURL: URL, captureMode: CaptureMode = .display) {
         self.sourceURL = sourceURL
@@ -465,22 +480,28 @@ final class EditorModel: ObservableObject {
     private func markDirty() {
         guard !isApplyingUndoRedo else { return }
 
-        // Mutators change state first, then call markDirty. Capture the
-        // pre-edit snapshot from `lastCommittedSnapshot` onto the undo stack.
-        if let previous = lastCommittedSnapshot {
-            let now = Date()
-            let coalescing = lastCheckpointTime.map { now.timeIntervalSince($0) < 0.4 } ?? false
-            if !coalescing {
-                if undoStack.last != previous {
-                    undoStack.append(previous)
-                    while undoStack.count > Self.maxHistoryDepth {
-                        undoStack.removeFirst()
-                    }
-                }
-                redoStack.removeAll(keepingCapacity: true)
-            }
-            lastCheckpointTime = now
+        // Mutators change state first, then call markDirty. Push the pre-edit
+        // snapshot so every real change is one undo step (max 5).
+        if lastCommittedSnapshot == nil {
+            // Load finished without reset — seed baseline from current post-edit
+            // state so the next edit still gets a checkpoint.
+            if !isDirty { isDirty = true }
+            lastCommittedSnapshot = makeEditSnapshot()
+            publishHistoryState()
+            return
         }
+
+        let previous = lastCommittedSnapshot!
+        // Compare against post-mutation content (dirty flag ignored).
+        let current = makeEditSnapshotWithDirty(true)
+        // Ignore no-ops (setter called but document content unchanged).
+        guard !previous.editContentEquals(current) else { return }
+
+        undoStack.append(previous)
+        while undoStack.count > Self.maxHistoryDepth {
+            undoStack.removeFirst()
+        }
+        redoStack.removeAll(keepingCapacity: true)
 
         if !isDirty {
             isDirty = true
@@ -497,8 +518,7 @@ final class EditorModel: ObservableObject {
             redoStack.removeFirst()
         }
         applyEditSnapshot(previous)
-        lastCommittedSnapshot = previous
-        lastCheckpointTime = nil
+        lastCommittedSnapshot = makeEditSnapshot()
         publishHistoryState()
     }
 
@@ -510,8 +530,7 @@ final class EditorModel: ObservableObject {
             undoStack.removeFirst()
         }
         applyEditSnapshot(next)
-        lastCommittedSnapshot = next
-        lastCheckpointTime = nil
+        lastCommittedSnapshot = makeEditSnapshot()
         publishHistoryState()
     }
 
@@ -523,12 +542,15 @@ final class EditorModel: ObservableObject {
     private func resetEditHistory() {
         undoStack.removeAll(keepingCapacity: true)
         redoStack.removeAll(keepingCapacity: true)
-        lastCheckpointTime = nil
         lastCommittedSnapshot = makeEditSnapshot()
         publishHistoryState()
     }
 
     private func makeEditSnapshot() -> EditSnapshot {
+        makeEditSnapshotWithDirty(isDirty)
+    }
+
+    private func makeEditSnapshotWithDirty(_ dirty: Bool) -> EditSnapshot {
         EditSnapshot(
             clips: clips,
             zoomRanges: zoomRanges,
@@ -544,7 +566,7 @@ final class EditorModel: ObservableObject {
             musicVolume: musicVolume,
             isOriginalAudioMuted: isOriginalAudioMuted,
             wallpaperID: wallpaperManager.selectedWallpaperID,
-            isDirty: isDirty
+            isDirty: dirty
         )
     }
 
@@ -580,13 +602,17 @@ final class EditorModel: ObservableObject {
         let musicTarget = snapshot.musicURL
         if musicURL != musicTarget {
             if let musicTarget {
+                // Keep URL in snapshot state immediately so history stays consistent
+                // while the asset reloads asynchronously.
+                musicURL = musicTarget
+                musicError = nil
                 Task { @MainActor in
                     await self.loadMusic(from: musicTarget)
                     self.rebuildTimelineCursorData()
                     self.duration = self.timelineClips.last?.end ?? self.duration
                     self.rebuildPreview(preservingPlayhead: true)
+                    self.lastCommittedSnapshot = self.makeEditSnapshot()
                 }
-                return
             } else {
                 musicURL = nil
                 musicAsset = nil

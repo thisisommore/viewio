@@ -719,6 +719,8 @@ private struct EditorWorkspace: View {
         }
         .navigationTitle(model.clipTitle)
         .focusedSceneValue(\.exportModel, model)
+        .focusedSceneValue(\.editorCanUndo, model.canUndo)
+        .focusedSceneValue(\.editorCanRedo, model.canRedo)
         .onAppear {
             model.onProjectSaved = { [weak recorder] url in
                 recorder?.adoptSavedProject(url)
