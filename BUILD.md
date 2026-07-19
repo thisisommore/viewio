@@ -101,14 +101,14 @@ spctl -a -vv /tmp/viewio_verify/viewio.app
 xcrun stapler validate /tmp/viewio_verify/viewio.app
 file /tmp/viewio_verify/viewio.app/Contents/MacOS/viewio          # thin arm64
 /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" \
-  /tmp/viewio_verify/viewio.app/Contents/Info.plist               # e.g. 26.1
+  /tmp/viewio_verify/viewio.app/Contents/Info.plist               # e.g. 26.0
 hdiutil detach /tmp/viewio_verify
 ```
 
 ## Notes
 
 - Minimum macOS version is set by `MACOSX_DEPLOYMENT_TARGET` on the `viewio`
-  target in `viewio.xcodeproj` (currently 26.1).
+  target in `viewio.xcodeproj` (currently 26.0).
 - Debug builds use `ONLY_ACTIVE_ARCH=YES`, so they are always arm64-only on
   Apple Silicon and are signed with the Apple Development certificate — do
   not distribute those.

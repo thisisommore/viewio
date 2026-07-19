@@ -71,7 +71,7 @@ See also the **[demo](docs/demo/demo.mp4)** above for the full product walkthrou
 
 | | |
 |---|---|
-| **Platform** | macOS (deployment target currently **26.1** - see Xcode project) |
+| **Platform** | macOS (deployment target currently **26.0** - see Xcode project) |
 | **Architecture** | Apple Silicon recommended; release DMG is arm64-only by default |
 | **Xcode** | Recent Xcode with SwiftUI + ScreenCaptureKit |
 | **Permissions** | Screen Recording (required); Microphone / Camera if enabled; Accessibility (optional, hide-cursor-while-typing) |
