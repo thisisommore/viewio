@@ -12,17 +12,13 @@
 
 Real export from viewio - cinematic zoom on the edited take.
 
-https://github.com/thisisommore/viewio/raw/main/docs/demo/export-zoom-demo.mp4
-
 <p align="center">
-  <a href="docs/demo/export-zoom-demo.mp4">
-    <img src="docs/demo/export-zoom-demo-poster.jpg" alt="Export zoom demo - click to play MP4" width="900" />
-  </a>
+  <img src="docs/demo/export-zoom-demo.gif" alt="Export zoom demo - autoplays in README" width="900" />
 </p>
 
 <p align="center">
-  <a href="docs/demo/export-zoom-demo.mp4"><strong>▶ Play export zoom demo</strong></a>
-  · <code>docs/demo/export-zoom-demo.mp4</code> (~12s · 2582×1968 · H.264)
+  <a href="docs/demo/export-zoom-demo.mp4">Download MP4</a>
+  · GIF autoplays in the README · full clip also in <code>docs/demo/</code>
 </p>
 
 ---
@@ -134,7 +130,8 @@ viewio/
 ├── docs/
 │   ├── screenshots/        # new-recording.png, editor.png
 │   └── demo/
-│       └── export-zoom-demo.mp4   # Final export demo (zoom)
+│       ├── export-zoom-demo.gif   # Autoplays in README
+│       └── export-zoom-demo.mp4   # Full quality download
 ├── BUILD.md                # Release / notarization pipeline
 └── viewio.xcodeproj
 ```
