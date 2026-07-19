@@ -2571,13 +2571,18 @@ final class EditorModel: ObservableObject {
     }
 
     private func installTimeObserver() {
+        // Callback is already scheduled on the main queue. Update playhead
+        // synchronously — wrapping in `Task { @MainActor }` deferred updates
+        // behind recording's cursor sampling and froze the overlay while video
+        // (AVPlayer) kept playing.
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 1.0 / 30.0, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
-            Task { @MainActor in
-                guard let self, !self.isSeeking else { return }
-                let seconds = time.seconds
+            guard let self else { return }
+            let seconds = time.seconds
+            MainActor.assumeIsolated {
+                guard !self.isSeeking else { return }
                 guard seconds.isFinite else { return }
                 self.playhead = min(self.duration, max(0, seconds))
                 self.isPlaying = self.player.timeControlStatus == .playing

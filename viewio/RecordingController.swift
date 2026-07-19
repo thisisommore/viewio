@@ -243,13 +243,12 @@ final class RecordingController: NSObject, ObservableObject {
     private var cursorTimer: Timer?
     private var cursorEventMonitor: Any?
     private var keyEventMonitor: Any?
-    private var cursorTrack: [CursorPosition] = []
-    private var clickEvents: [ClickEvent] = []
-    private var keyEvents: [KeyEvent] = []
+    /// Thread-safe buffer so global mouse/key monitors don't flood MainActor
+    /// (which froze playhead-driven cursor overlays in other editor windows).
+    private let cursorBuffer = CursorTrackBuffer()
     private var recordedDisplayID: CGDirectDisplayID?
     /// Global Cocoa bounds (points, origin bottom-left) of the captured display.
     private var captureBounds: CGRect = .zero
-    private var wasLeftButtonDown = false
     /// Live Accessibility trust state, refreshed so the start page can warn
     /// that typing detection ("hide cursor while typing") won't capture keys.
     @Published private(set) var isAccessibilityTrusted = AXIsProcessTrusted()
@@ -939,12 +938,17 @@ final class RecordingController: NSObject, ObservableObject {
 
     private func startTimer() {
         stopTimer()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let startedAt = self.startedAt else { return }
+        // Fire on the main run loop directly — no Task hop (keeps elapsed
+        // updates from contending with editor playhead under load).
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                guard let startedAt = self.startedAt else { return }
                 self.elapsed = Date().timeIntervalSince(startedAt)
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     private func stopTimer() {
@@ -954,26 +958,24 @@ final class RecordingController: NSObject, ObservableObject {
 
     private func startCursorTracking() {
         stopCursorTracking()
-        cursorTrack = []
-        clickEvents = []
-        keyEvents = []
-        wasLeftButtonDown = false
         guard recordedDisplayID != nil, captureBounds.width > 1, captureBounds.height > 1 else { return }
+        guard let hostStart = recordingHostStart else { return }
         let bounds = captureBounds
+        cursorBuffer.begin(hostStart: hostStart, bounds: bounds)
 
         // Sample cursor at least as often as capture FPS (capped for overhead).
         let cursorHz = min(60.0, max(30.0, Double(selectedFrameRate.rawValue)))
         // Main run loop + common modes so tracking continues during UI tracking loops.
+        // Work stays in the buffer (lock-based) so we never enqueue MainActor Tasks.
         let timer = Timer(timeInterval: 1.0 / cursorHz, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.sampleCursor(bounds: bounds)
-            }
+            self?.cursorBuffer.sampleMouse()
         }
         RunLoop.main.add(timer, forMode: .common)
         cursorTimer = timer
         // Polling alone can be a frame late while the pointer is moving. Listen
         // to the real global mouse events as well, so the track contains the
         // exact position and timestamp used for a move or click.
+        // Monitors deliver off-main; CursorTrackBuffer is thread-safe.
         let eventMask: NSEvent.EventTypeMask = [
             .mouseMoved,
             .leftMouseDragged,
@@ -982,9 +984,7 @@ final class RecordingController: NSObject, ObservableObject {
             .leftMouseDown
         ]
         cursorEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.recordCursorEvent(event, bounds: bounds)
-            }
+            self?.cursorBuffer.recordMouseEvent(event)
         }
         // Keystroke times feed the editor's "hide cursor when typing" option.
         // Global key monitors only fire when the app is trusted for
@@ -992,87 +992,10 @@ final class RecordingController: NSObject, ObservableObject {
         // (only timestamps are captured, never key identities). The start
         // page surfaces the missing permission with a request button.
         keyEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.recordKeyEvent(event)
-            }
+            self?.cursorBuffer.recordKeyEvent(event)
         }
         // Immediate sample at t≈0 so the first frame is aligned.
-        sampleCursor(bounds: bounds)
-    }
-
-    private func sampleCursor(bounds: CGRect) {
-        guard let hostStart = recordingHostStart else { return }
-        // NSEvent.mouseLocation is the cursor *hotspot* in global Cocoa points.
-        let time = ProcessInfo.processInfo.systemUptime - hostStart
-        appendCursorSample(
-            at: NSEvent.mouseLocation,
-            time: time,
-            bounds: bounds
-        )
-        recordClickIfNeeded(at: time)
-    }
-
-    private func recordCursorEvent(_ event: NSEvent, bounds: CGRect) {
-        guard let hostStart = recordingHostStart else { return }
-        // Global-monitor events normally have no window, in which case AppKit
-        // provides a screen-space point. Convert defensively if one does.
-        let location: CGPoint
-        if let window = event.window {
-            location = window.convertPoint(toScreen: event.locationInWindow)
-        } else {
-            location = event.locationInWindow
-        }
-        let time = max(0, event.timestamp - hostStart)
-        appendCursorSample(at: location, time: time, bounds: bounds)
-
-        if event.type == .leftMouseDown {
-            recordClick(at: time)
-            wasLeftButtonDown = true
-        }
-    }
-
-    private func appendCursorSample(at location: CGPoint, time: TimeInterval, bounds: CGRect) {
-        let relativeX = (location.x - bounds.origin.x) / bounds.width
-        // Cocoa Y is bottom-up; store already flipped to video top-left (0 = top)
-        // so playback never double-flips or mixes conventions.
-        let relativeYFromTop = 1 - (location.y - bounds.origin.y) / bounds.height
-        let position = CursorPosition(
-            time: max(0, time),
-            x: max(0, min(1, relativeX)),
-            y: max(0, min(1, relativeYFromTop))
-        )
-        // Event monitors are asynchronous, so an event can arrive just after a
-        // timer sample. Keep the timeline ordered for interpolation in preview.
-        if let last = cursorTrack.last, position.time < last.time {
-            let index = cursorTrack.firstIndex { $0.time > position.time } ?? cursorTrack.endIndex
-            cursorTrack.insert(position, at: index)
-        } else {
-            cursorTrack.append(position)
-        }
-    }
-
-    private func recordClickIfNeeded(at time: TimeInterval) {
-        let isDown = CGEventSource.buttonState(.combinedSessionState, button: .left)
-        if isDown && !wasLeftButtonDown {
-            recordClick(at: time)
-        }
-        wasLeftButtonDown = isDown
-    }
-
-    private func recordClick(at time: TimeInterval) {
-        // A timer sample and the matching mouse-down event can arrive together.
-        // Keep one click at the event's precise timestamp.
-        guard clickEvents.last.map({ abs($0.time - time) > 0.04 }) ?? true else { return }
-        clickEvents.append(ClickEvent(time: time, button: 0))
-    }
-
-    /// Keystroke times from the global key monitor (Accessibility only) feed
-    /// the editor's "hide cursor when typing" option. Only the timestamp is
-    /// stored — never which key was pressed.
-    private func recordKeyEvent(_ event: NSEvent) {
-        guard let hostStart = recordingHostStart else { return }
-        let time = max(0, event.timestamp - hostStart)
-        keyEvents.append(KeyEvent(time: time))
+        cursorBuffer.sampleMouse()
     }
 
     private func stopCursorTracking() {
@@ -1089,13 +1012,14 @@ final class RecordingController: NSObject, ObservableObject {
     }
 
     private func saveCursorTrack(for videoURL: URL) {
-        guard !cursorTrack.isEmpty else { return }
+        let snapshot = cursorBuffer.snapshot()
+        guard !snapshot.positions.isEmpty else { return }
         let trackURL = videoURL.deletingPathExtension().appendingPathExtension("cursor.json")
         do {
             let file = CursorTrackFile(
                 version: CursorTrackFile.currentVersion,
                 coordinateSpace: CursorTrackFile.videoTopLeft,
-                samples: cursorTrack,
+                samples: snapshot.positions,
                 captureSizePoints: captureBounds.size
             )
             let encoder = JSONEncoder()
@@ -1106,10 +1030,10 @@ final class RecordingController: NSObject, ObservableObject {
             print("Failed to save cursor track: \(error)")
         }
 
-        guard !clickEvents.isEmpty else { return }
+        guard !snapshot.clicks.isEmpty else { return }
         let clicksURL = videoURL.deletingPathExtension().appendingPathExtension("clicks.json")
         do {
-            let data = try JSONEncoder().encode(clickEvents)
+            let data = try JSONEncoder().encode(snapshot.clicks)
             try data.write(to: clicksURL)
         } catch {
             print("Failed to save click events: \(error)")
@@ -1117,11 +1041,12 @@ final class RecordingController: NSObject, ObservableObject {
     }
 
     private func saveKeyEvents(for videoURL: URL) {
-        guard !keyEvents.isEmpty else { return }
+        let keys = cursorBuffer.snapshot().keys
+        guard !keys.isEmpty else { return }
         let keysURL = videoURL.deletingPathExtension().appendingPathExtension("keys.json")
         do {
             // Monitor callbacks can arrive slightly out of order.
-            let data = try JSONEncoder().encode(keyEvents.sorted { $0.time < $1.time })
+            let data = try JSONEncoder().encode(keys.sorted { $0.time < $1.time })
             try data.write(to: keysURL)
         } catch {
             print("Failed to save key events: \(error)")
@@ -1134,12 +1059,9 @@ final class RecordingController: NSObject, ObservableObject {
         startedAt = nil
         recordingHostStart = nil
         elapsed = 0
-        cursorTrack = []
-        clickEvents = []
-        keyEvents = []
+        cursorBuffer.reset()
         recordedDisplayID = nil
         captureBounds = .zero
-        wasLeftButtonDown = false
         overlayWindow?.close()
         overlayWindow = nil
         cameraRecorder?.invalidate()
@@ -1334,5 +1256,150 @@ private enum RecordingError: LocalizedError {
         case .cameraDenied:
             "Camera access was denied. Enable it in System Settings to record camera video."
         }
+    }
+}
+
+// MARK: - Cursor track buffer
+
+/// Collects cursor/click/key samples from timers and global event monitors
+/// without hopping onto MainActor for every mouse move. That keeps editor
+/// playhead updates (and the live cursor overlay) responsive while another
+/// window is recording.
+private final class CursorTrackBuffer: @unchecked Sendable {
+    struct Snapshot {
+        var positions: [CursorPosition]
+        var clicks: [ClickEvent]
+        var keys: [KeyEvent]
+    }
+
+    private let lock = NSLock()
+    private var hostStart: TimeInterval?
+    private var bounds: CGRect = .zero
+    private var positions: [CursorPosition] = []
+    private var clicks: [ClickEvent] = []
+    private var keys: [KeyEvent] = []
+    private var wasLeftButtonDown = false
+
+    func begin(hostStart: TimeInterval, bounds: CGRect) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.hostStart = hostStart
+        self.bounds = bounds
+        positions = []
+        clicks = []
+        keys = []
+        wasLeftButtonDown = false
+    }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        hostStart = nil
+        bounds = .zero
+        positions = []
+        clicks = []
+        keys = []
+        wasLeftButtonDown = false
+    }
+
+    func sampleMouse() {
+        lock.lock()
+        guard let hostStart, bounds.width > 1, bounds.height > 1 else {
+            lock.unlock()
+            return
+        }
+        let bounds = self.bounds
+        let start = hostStart
+        lock.unlock()
+
+        let time = ProcessInfo.processInfo.systemUptime - start
+        appendSample(at: NSEvent.mouseLocation, time: time, bounds: bounds)
+        recordClickIfNeeded(at: time)
+    }
+
+    func recordMouseEvent(_ event: NSEvent) {
+        lock.lock()
+        guard let hostStart, bounds.width > 1, bounds.height > 1 else {
+            lock.unlock()
+            return
+        }
+        let bounds = self.bounds
+        let start = hostStart
+        lock.unlock()
+
+        // Global-monitor events normally have no window, in which case AppKit
+        // provides a screen-space point. Convert defensively if one does.
+        let location: CGPoint
+        if let window = event.window {
+            location = window.convertPoint(toScreen: event.locationInWindow)
+        } else {
+            location = event.locationInWindow
+        }
+        let time = max(0, event.timestamp - start)
+        appendSample(at: location, time: time, bounds: bounds)
+
+        if event.type == .leftMouseDown {
+            recordClick(at: time)
+            lock.lock()
+            wasLeftButtonDown = true
+            lock.unlock()
+        }
+    }
+
+    func recordKeyEvent(_ event: NSEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let hostStart else { return }
+        let time = max(0, event.timestamp - hostStart)
+        keys.append(KeyEvent(time: time))
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(positions: positions, clicks: clicks, keys: keys)
+    }
+
+    private func appendSample(at location: CGPoint, time: TimeInterval, bounds: CGRect) {
+        let relativeX = (location.x - bounds.origin.x) / bounds.width
+        // Cocoa Y is bottom-up; store already flipped to video top-left (0 = top)
+        // so playback never double-flips or mixes conventions.
+        let relativeYFromTop = 1 - (location.y - bounds.origin.y) / bounds.height
+        let position = CursorPosition(
+            time: max(0, time),
+            x: max(0, min(1, relativeX)),
+            y: max(0, min(1, relativeYFromTop))
+        )
+
+        lock.lock()
+        defer { lock.unlock() }
+        // Event monitors are asynchronous, so an event can arrive just after a
+        // timer sample. Keep the timeline ordered for interpolation in preview.
+        if let last = positions.last, position.time < last.time {
+            let index = positions.firstIndex { $0.time > position.time } ?? positions.endIndex
+            positions.insert(position, at: index)
+        } else {
+            positions.append(position)
+        }
+    }
+
+    private func recordClickIfNeeded(at time: TimeInterval) {
+        let isDown = CGEventSource.buttonState(.combinedSessionState, button: .left)
+        lock.lock()
+        let wasDown = wasLeftButtonDown
+        wasLeftButtonDown = isDown
+        lock.unlock()
+        if isDown && !wasDown {
+            recordClick(at: time)
+        }
+    }
+
+    private func recordClick(at time: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        // A timer sample and the matching mouse-down event can arrive together.
+        // Keep one click at the event's precise timestamp.
+        guard clicks.last.map({ abs($0.time - time) > 0.04 }) ?? true else { return }
+        clicks.append(ClickEvent(time: time, button: 0))
     }
 }
