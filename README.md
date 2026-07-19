@@ -2,26 +2,10 @@
 
 **Cinematic screen recording for macOS.** Capture your display or a single window, then polish the take with auto zoom, a redesigned cursor, motion blur, camera PiP, and backgrounds - all in one app.
 
-<p align="center">
-  <img src="docs/screenshots/editor.png" alt="viewio editor with timeline, zoom ranges, and background panel" width="900" />
-</p>
-
----
-
-## Demo
-
-Product walkthrough — capture, edit, and export with cinematic zoom.
 
 <p align="center">
   <img src="docs/demo/demo.gif" alt="viewio demo - autoplays in README" width="900" />
 </p>
-
-<p align="center">
-  <a href="docs/demo/demo.mp4">Download MP4</a>
-  · GIF autoplays in the README · source in <code>docs/demo/</code>
-</p>
-
----
 
 ## Features
 
@@ -62,8 +46,6 @@ Pick a display, resolution, and audio sources - then start recording.
 Cut, zoom, restyle the cursor, and drop in a background - without leaving the app.
 
 ![Editor](docs/screenshots/editor.png)
-
-See also the **[demo](docs/demo/demo.mp4)** above for the full product walkthrough.
 
 ---
 
@@ -145,7 +127,3 @@ viewio/
 - Camera and microphone are only used when you enable them for a recording.
 
 ---
-
-## License
-
-Add a license file if you plan to open-source or distribute under specific terms.
