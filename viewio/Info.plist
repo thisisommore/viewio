@@ -17,6 +17,8 @@
 			</array>
 		</dict>
 	</array>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>viewio detects when you type during a recording so the cursor can be hidden while typing in the video. Only keystroke timing is captured — never which keys you press.</string>
 	<key>UTExportedTypeDeclarations</key>

@@ -276,13 +276,13 @@ private struct RecordingStartView: View {
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Accessibility access is off")
-                Text("Needed to detect typing for the “hide cursor while typing” effect. Optional — recording works without it.")
+                Text("Needed to detect typing for the “hide cursor while typing” effect. Optional — recording works without it. \(RecordingController.accessibilityInstructions)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
-            Button("Enable Accessibility…", action: recorder.requestAccessibilityAccess)
+            Button(RecordingController.accessibilityButtonTitle, action: recorder.requestAccessibilityAccess)
         }
         .font(.callout)
         .padding(14)
@@ -2164,13 +2164,12 @@ private struct CursorInspectorPanel: View {
 
                 if !AXIsProcessTrusted() {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Typing detection needs Accessibility access to capture keystrokes for “hide while typing” — optional, everything else works without it.")
+                        Text("Typing detection needs Accessibility access to capture keystrokes for “hide while typing” — optional, everything else works without it. \(RecordingController.accessibilityInstructions)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        Button("Enable Accessibility…") {
-                            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-                            _ = AXIsProcessTrustedWithOptions(options)
+                        Button(RecordingController.accessibilityButtonTitle) {
+                            RecordingController.requestAccessibilityAccess()
                         }
                         .controlSize(.small)
                     }

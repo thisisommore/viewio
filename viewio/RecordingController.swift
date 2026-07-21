@@ -277,13 +277,18 @@ final class RecordingController: NSObject, ObservableObject {
         discoverCameras()
         discoverMicrophones()
         configureContentPicker()
+#if !APP_STORE
         if !AXIsProcessTrusted() {
-            // Registers the app in System Settings → Accessibility so the
-            // toggle exists to flip (the system prompt is shown at most once;
-            // later calls are silent no-ops while untrusted).
+            // Direct (non-sandboxed) builds can self-register in System
+            // Settings → Accessibility. The system prompt is shown at most
+            // once; later calls are silent no-ops while untrusted.
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
         }
+#endif
+        // Sandboxed (App Store) builds cannot self-register — the user must
+        // add the app with "+" in the pane. Either way, track the live trust
+        // state here; the banner buttons trigger the right flow per channel.
         accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshAccessibilityTrust()
@@ -297,11 +302,33 @@ final class RecordingController: NSObject, ObservableObject {
         isAccessibilityTrusted = trusted
     }
 
-    /// Asks the system for Accessibility access. macOS shows its own modal
-    /// (with an "Open System Settings" shortcut) — no need to open the pane.
-    func requestAccessibilityAccess() {
+    /// App Store builds are sandboxed and cannot self-register in System
+    /// Settings → Accessibility — AXIsProcessTrustedWithOptions is a silent
+    /// no-op — so the button opens the pane for a manual "+" add. Direct
+    /// (non-sandboxed) builds show the system prompt, which adds the app to
+    /// the list automatically.
+#if APP_STORE
+    static let accessibilityButtonTitle = "Open Accessibility Settings…"
+    static let accessibilityInstructions = "To enable: open the settings and add viewio with the “+” button."
+#else
+    static let accessibilityButtonTitle = "Enable Accessibility…"
+    static let accessibilityInstructions = "macOS will ask to allow viewio to control this computer — approve it in the prompt."
+#endif
+
+    static func requestAccessibilityAccess() {
+#if !APP_STORE
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
+#endif
+        if !AXIsProcessTrusted(),
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Instance wrapper that also refreshes the published trust state.
+    func requestAccessibilityAccess() {
+        RecordingController.requestAccessibilityAccess()
         isAccessibilityTrusted = AXIsProcessTrusted()
     }
 

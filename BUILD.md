@@ -5,6 +5,26 @@ Developer ID signed, notarized and stapled (both the app and the DMG).
 
 All commands run from the **repository root**.
 
+## Distribution channels
+
+viewio ships through two channels, selected by scheme:
+
+- **`viewio (App Store)`** — archives the `Release` configuration: App
+  Sandbox enabled (`viewio/viewio.entitlements`), `APP_STORE` compilation
+  flag. Upload the archive to App Store Connect from Xcode's Organizer.
+- **`viewio (Direct)`** — archives the `Release-Direct` configuration: no
+  sandbox (`viewio/viewio-direct.entitlements`), hardened runtime for
+  notarization. This is the DMG flow documented below.
+
+The main differences are in the Accessibility-permission flow: sandboxed
+builds open System Settings for a manual "+" add, direct builds show the
+system prompt (`#if APP_STORE` in `RecordingController.swift`).
+
+Each scheme runs its channel's behavior even while developing: `viewio
+(App Store)` runs the sandboxed `Debug` configuration, `viewio (Direct)`
+runs the non-sandboxed `Debug-Direct` configuration; tests use `Debug`.
+They differ in which Release configuration Archive uses.
+
 ## Prerequisites (one-time setup)
 
 1. **Developer ID Application certificate** in your login keychain
@@ -23,14 +43,14 @@ All commands run from the **repository root**.
 
 ## Build steps
 
-### 1. Archive (Release, arm64-only)
+### 1. Archive (Release-Direct, arm64-only)
 
 ```bash
 rm -rf build/viewio.xcarchive build/dist/export
 xcodebuild archive \
   -project viewio.xcodeproj \
-  -scheme viewio \
-  -configuration Release \
+  -scheme "viewio (Direct)" \
+  -configuration Release-Direct \
   -archivePath build/viewio.xcarchive \
   ARCHS=arm64
 ```
