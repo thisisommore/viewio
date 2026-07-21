@@ -417,14 +417,18 @@ final class EditorModel: ObservableObject {
         // Fresh recordings are unsaved projects until the user saves.
         self.isDirty = true
         installTimeObserver()
-        wallpaperManager.loadWallpapersIfNeeded()
-        // Wallpaper choice is per recording — reset to the default so a
-        // previous recording's selection doesn't leak into this one.
-        if let first = wallpaperManager.wallpapers.first {
-            wallpaperManager.selectWallpaper(first)
-        }
-        observeWallpaperChanges()
+        // Deferred past the current view update — publishing to the shared
+        // WallpaperManager synchronously here triggers SwiftUI's "Publishing
+        // changes from within view updates" warning (this init runs while
+        // ContentView's body is being evaluated).
         Task {
+            wallpaperManager.loadWallpapersIfNeeded()
+            // Wallpaper choice is per recording — reset to the default so a
+            // previous recording's selection doesn't leak into this one.
+            if let first = wallpaperManager.wallpapers.first {
+                wallpaperManager.selectWallpaper(first)
+            }
+            observeWallpaperChanges()
             await loadSource()
         }
     }
@@ -444,9 +448,10 @@ final class EditorModel: ObservableObject {
             self.pendingDocument = loaded.document
             self.isDirty = false
             installTimeObserver()
-            wallpaperManager.loadWallpapersIfNeeded()
-            observeWallpaperChanges()
+            // Deferred past the current view update — see init(sourceURL:).
             Task {
+                wallpaperManager.loadWallpapersIfNeeded()
+                observeWallpaperChanges()
                 await loadSource()
             }
         } catch {

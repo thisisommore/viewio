@@ -814,7 +814,12 @@ private struct PlayerView: NSViewRepresentable {
         init(videoRect: Binding<CGRect>) { binding = videoRect }
         @MainActor
         func updateVideoRect(_ rect: CGRect) {
-            if binding.wrappedValue != rect {
+            // Called from updateNSView/layout() — i.e. inside SwiftUI's
+            // update pass. Defer the write or SwiftUI warns "Modifying state
+            // during view update". The != guard keeps repeat reports from
+            // scheduling redundant writes.
+            DispatchQueue.main.async { [binding] in
+                guard binding.wrappedValue != rect else { return }
                 binding.wrappedValue = rect
             }
         }
