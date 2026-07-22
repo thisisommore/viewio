@@ -2180,9 +2180,12 @@ final class EditorModel: ObservableObject {
 
         // When a wallpaper is active, shrink the video by the padding setting
         // and center it so the background image shows around the edges.
+        // renderScale folds the export downscale into the transform — without
+        // it the video would draw at native size and get cropped by the
+        // smaller render canvas.
         let baseTransform: CGAffineTransform
         if includeWallpaper {
-            let placementScale = CGFloat(1 - 2 * backgroundPadding)
+            let placementScale = CGFloat(1 - 2 * backgroundPadding) * renderScale
             let orientedWidth = abs(transformedSize.width)
             let orientedHeight = abs(transformedSize.height)
             let offsetX = (renderSize.width - orientedWidth * placementScale) / 2
@@ -2191,7 +2194,9 @@ final class EditorModel: ObservableObject {
                 .translatedBy(x: offsetX / placementScale, y: offsetY / placementScale)
             baseTransform = preferred.concatenating(placement)
         } else {
-            baseTransform = preferred
+            baseTransform = preferred.concatenating(
+                CGAffineTransform(scaleX: renderScale, y: renderScale)
+            )
         }
         if renderScale == 1 {
             compositionBaseTransform = baseTransform

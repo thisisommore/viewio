@@ -207,8 +207,13 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
             }
 
             // AVVideoComposition transforms use a top-left origin; Core Image is
-            // bottom-left — convert before applying the zoom matrix.
-            let ciTransform = avTransformToCI(sample.transform, height: render.height)
+            // bottom-left — convert before applying the zoom matrix. Source and
+            // render heights differ for downscaled exports.
+            let ciTransform = avTransformToCI(
+                sample.transform,
+                sourceHeight: image.extent.height,
+                renderHeight: render.height
+            )
             image = image.transformed(by: ciTransform)
 
             // Fill the output frame with the selected wallpaper, or black.
@@ -364,9 +369,19 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
     }
 
     /// Convert an AVFoundation (top-left) affine transform into Core Image space.
-    private func avTransformToCI(_ transform: CGAffineTransform, height: CGFloat) -> CGAffineTransform {
-        let flip = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: height)
-        return flip.concatenating(transform).concatenating(flip)
+    /// Converts an AVVideoComposition (top-left origin) transform to Core Image
+    /// (bottom-left). The two flips use different heights: the transform input
+    /// is the full-size source frame while the output is the (possibly
+    /// downscaled) render frame — using the render height for both breaks
+    /// reduced-size exports by shifting the content out of frame.
+    private func avTransformToCI(
+        _ transform: CGAffineTransform,
+        sourceHeight: CGFloat,
+        renderHeight: CGFloat
+    ) -> CGAffineTransform {
+        let sourceFlip = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: sourceHeight)
+        let renderFlip = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: renderHeight)
+        return sourceFlip.concatenating(transform).concatenating(renderFlip)
     }
 
     // MARK: - Cursor overlay
