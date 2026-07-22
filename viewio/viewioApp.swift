@@ -90,7 +90,6 @@ private struct WindowSessionRoot: View {
 struct viewioApp: App {
     @NSApplicationDelegateAdaptor(ViewioAppDelegate.self) private var appDelegate
     @StateObject private var wallpaperManager = WallpaperManager.shared
-    @StateObject private var sessions = ViewioSessionRegistry.shared
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.exportModel) private var exportModel
     @FocusedValue(\.recordingController) private var focusedRecorder
@@ -172,41 +171,6 @@ struct viewioApp: App {
             }
         }
 
-        MenuBarExtra(
-            isInserted: Binding(
-                get: { sessions.isAnyRecording },
-                set: { _ in }
-            )
-        ) {
-            Text("Screen recording")
-            Text(formattedDuration(sessions.recordingElapsed))
-                .font(.system(size: 12, design: .monospaced))
-
-            Divider()
-
-            Button("Stop Recording") {
-                sessions.activeRecording?.stopRecording()
-            }
-            .disabled(!canStopActiveRecording)
-
-            Button("Discard Recording", role: .destructive) {
-                sessions.activeRecording?.discardInProgressRecording()
-            }
-            .disabled(!canStopActiveRecording)
-        } label: {
-            Label("Screen Recording", systemImage: "record.circle.fill")
-        }
-        .menuBarExtraStyle(.menu)
-    }
-
-    private var canStopActiveRecording: Bool {
-        guard let recorder = sessions.activeRecording else { return false }
-        switch recorder.state {
-        case .preparing, .recording:
-            return true
-        case .idle, .stopping, .failed, .finished, .project:
-            return false
-        }
     }
 
     private var isEditingFocused: Bool {
