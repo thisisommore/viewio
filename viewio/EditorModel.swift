@@ -304,6 +304,9 @@ final class EditorModel: ObservableObject {
 
     @Published private(set) var loadState: LoadState = .loading
     @Published private(set) var exportState: ExportState = .idle
+    /// Last-used export options; persists across exports within the session.
+    @Published var exportSettings = ExportSettings()
+    @Published var showExportOptions = false
     @Published private(set) var isDirty = false
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
@@ -1402,16 +1405,31 @@ final class EditorModel: ObservableObject {
     func export() {
         guard case .ready = loadState else { return }
         guard !clips.isEmpty else { return }
+        showExportOptions = true
+    }
+
+    /// Called from the export-options sheet: pick a destination, then export
+    /// with the current `exportSettings`.
+    func exportWithOptions() {
+        guard case .ready = loadState else { return }
+        guard !clips.isEmpty else { return }
 
         let panel = NSSavePanel()
         panel.title = "Export Video"
         panel.message = "Choose where to save the edited recording."
-        panel.nameFieldStringValue = "\(exportBaseTitle) Edited.mp4"
-        panel.allowedContentTypes = [.mpeg4Movie]
+        panel.nameFieldStringValue = "\(exportBaseTitle) Edited.\(exportSettings.format.fileExtension)"
+        switch exportSettings.format {
+        case .mp4H264, .mp4HEVC:
+            panel.allowedContentTypes = [.mpeg4Movie]
+        case .movH264:
+            panel.allowedContentTypes = [.quickTimeMovie]
+        case .gif:
+            panel.allowedContentTypes = [.gif]
+        }
         panel.canCreateDirectories = true
 
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
-        export(to: outputURL)
+        export(to: outputURL, settings: exportSettings)
     }
 
     private var exportBaseTitle: String {
@@ -1635,10 +1653,10 @@ final class EditorModel: ObservableObject {
         musicError = nil
     }
 
-    func export(to outputURL: URL) {
+    func export(to outputURL: URL, settings: ExportSettings = ExportSettings()) {
         guard case .ready = loadState else { return }
         guard !clips.isEmpty else { return }
-        startExport(to: outputURL)
+        startExport(to: outputURL, settings: settings)
     }
 
     func dismissExportMessage() {
@@ -1990,7 +2008,9 @@ final class EditorModel: ObservableObject {
     }
 
     private func makeComposition(
-        includeCursorOverlay: Bool
+        includeCursorOverlay: Bool,
+        renderScale: CGFloat = 1,
+        frameRate: Int32 = 60
     ) -> (
         composition: AVMutableComposition,
         videoComposition: AVMutableVideoComposition,
@@ -2102,7 +2122,9 @@ final class EditorModel: ObservableObject {
             cameraTrack: compositionCameraTrack,
             sourceTrack: sourceVideoTrack,
             duration: cursor,
-            includeCursorOverlay: includeCursorOverlay
+            includeCursorOverlay: includeCursorOverlay,
+            renderScale: renderScale,
+            frameRate: frameRate
         )
         return (
             composition,
@@ -2119,22 +2141,31 @@ final class EditorModel: ObservableObject {
         cameraTrack: AVMutableCompositionTrack?,
         sourceTrack: AVAssetTrack,
         duration: CMTime,
-        includeCursorOverlay: Bool
+        includeCursorOverlay: Bool,
+        renderScale: CGFloat = 1,
+        frameRate: Int32 = 60
     ) -> AVMutableVideoComposition {
         let naturalSize = sourceTrack.naturalSize
         let preferred = sourceTrack.preferredTransform
         let transformedSize = naturalSize.applying(preferred)
-        // Integer pixel size — fractional render sizes can trip the VRP.
+        // Even integer pixel size — fractional/odd render sizes can trip the
+        // VRP and most video codecs. All downstream geometry (wallpaper,
+        // camera, zoom keyframes, cursor) derives from renderSize, so a
+        // reduced scale downscales the whole export proportionally.
         let renderSize = CGSize(
-            width: max(2, abs(transformedSize.width).rounded()),
-            height: max(2, abs(transformedSize.height).rounded())
+            width: max(2, (abs(transformedSize.width) * renderScale / 2).rounded(.down) * 2),
+            height: max(2, (abs(transformedSize.height) * renderScale / 2).rounded(.down) * 2)
         )
-        videoRenderSize = renderSize
+        // The preview cursor overlay tracks videoRenderSize — only update it
+        // for the full-scale (preview) build, not reduced-size exports.
+        if renderScale == 1 {
+            videoRenderSize = renderSize
+        }
 
 
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = renderSize
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
+        videoComposition.frameDuration = CMTime(value: 1, timescale: frameRate)
         // Tag as BT.709 so players interpret the sRGB-space frames consistently
         // instead of guessing the color space (washed-out playback).
         videoComposition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
@@ -2162,14 +2193,20 @@ final class EditorModel: ObservableObject {
         } else {
             baseTransform = preferred
         }
-        compositionBaseTransform = baseTransform
+        if renderScale == 1 {
+            compositionBaseTransform = baseTransform
+        }
         // One keyframe timeline shared by video + cursor overlay (critical for lock-on).
         let samples = buildZoomTransformSamples(
             baseTransform: baseTransform,
             renderSize: renderSize,
             duration: duration.seconds
         )
-        zoomTransformSamples = samples
+        // Preview-only state (used by displayCursorPoint in renderSize pixel
+        // space) — don't clobber it with reduced-size export transforms.
+        if renderScale == 1 {
+            zoomTransformSamples = samples
+        }
 
         let zoomBlur = motionBlurSettings.zoomStrength
         let includeCamera = cameraTrack != nil && cameraSettings.isEnabled
@@ -2742,25 +2779,54 @@ final class EditorModel: ObservableObject {
         )
     }
 
-    private func startExport(to outputURL: URL) {
+    private func startExport(to outputURL: URL, settings: ExportSettings) {
         // Bake cursor with Core Animation tool — valid for offline export only.
-        guard let build = makeComposition(includeCursorOverlay: true) else {
+        guard let build = makeComposition(
+            includeCursorOverlay: true,
+            renderScale: settings.scale.rawValue,
+            frameRate: Int32(settings.frameRate)
+        ) else {
             exportState = .failed("Unable to prepare this recording for export.")
             return
         }
 
         try? FileManager.default.removeItem(at: outputURL)
 
+        if settings.format.isGIF {
+            exportState = .exporting(0)
+            GIFExporter.export(
+                composition: build.composition,
+                videoComposition: build.videoComposition,
+                to: outputURL,
+                frameRate: settings.frameRate,
+                progress: { [weak self] value in
+                    self?.exportState = .exporting(value)
+                },
+                completion: { [weak self] result in
+                    switch result {
+                    case .success(let url):
+                        self?.exportState = .completed(url)
+                    case .failure(let error):
+                        self?.exportState = .failed(error.localizedDescription)
+                    }
+                }
+            )
+            return
+        }
+
+        let presetName = settings.format == .mp4HEVC
+            ? AVAssetExportPresetHEVCHighestQuality
+            : AVAssetExportPresetHighestQuality
         guard let session = AVAssetExportSession(
             asset: build.composition,
-            presetName: AVAssetExportPresetHighestQuality
+            presetName: presetName
         ) else {
             exportState = .failed("This recording cannot be exported on this Mac.")
             return
         }
 
         session.outputURL = outputURL
-        session.outputFileType = .mp4
+        session.outputFileType = settings.format == .movH264 ? .mov : .mp4
         session.videoComposition = build.videoComposition
         session.audioMix = makeAudioMix(for: build.composition)
         session.shouldOptimizeForNetworkUse = true

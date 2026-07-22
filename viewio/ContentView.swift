@@ -743,6 +743,9 @@ private struct EditorWorkspace: View {
         } message: {
             Text(model.projectSaveError ?? "")
         }
+        .sheet(isPresented: $model.showExportOptions) {
+            ExportOptionsView(model: model)
+        }
         .overlay {
             ExportOverlay(state: model.exportState, dismiss: model.dismissExportMessage)
         }
@@ -2951,6 +2954,82 @@ private struct ClickEffectDemo: View {
                 }
             }
         }
+    }
+}
+
+private struct ExportOptionsView: View {
+    @ObservedObject var model: EditorModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Export Options")
+                .font(.headline)
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                GridRow {
+                    Text("Format:")
+                        .foregroundStyle(.secondary)
+                    Picker("Format", selection: $model.exportSettings.format) {
+                        ForEach(ExportSettings.Format.allCases) { format in
+                            Text(format.displayName).tag(format)
+                        }
+                    }
+                    .labelsHidden()
+                    .onChange(of: model.exportSettings.format) {
+                        model.exportSettings.coerceFrameRate()
+                    }
+                }
+                GridRow {
+                    Text("Resolution:")
+                        .foregroundStyle(.secondary)
+                    Picker("Resolution", selection: $model.exportSettings.scale) {
+                        ForEach(ExportSettings.ResolutionScale.allCases) { scale in
+                            Text("\(scale.displayName) — \(pixelSize(for: scale))").tag(scale)
+                        }
+                    }
+                    .labelsHidden()
+                }
+                GridRow {
+                    Text("Frame rate:")
+                        .foregroundStyle(.secondary)
+                    Picker("Frame rate", selection: $model.exportSettings.frameRate) {
+                        ForEach(model.exportSettings.allowedFrameRates, id: \.self) { rate in
+                            Text("\(rate) fps").tag(rate)
+                        }
+                    }
+                    .labelsHidden()
+                }
+            }
+
+            if model.exportSettings.format.isGIF {
+                Text("GIF exports have no audio.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+                Button("Export…") {
+                    dismiss()
+                    model.exportWithOptions()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+    }
+
+    private func pixelSize(for scale: ExportSettings.ResolutionScale) -> String {
+        let native = model.videoRenderSize
+        let width = Int(native.width * scale.rawValue)
+        let height = Int(native.height * scale.rawValue)
+        return "\(width) × \(height)"
     }
 }
 
