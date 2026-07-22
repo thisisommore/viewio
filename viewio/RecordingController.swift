@@ -695,19 +695,17 @@ final class RecordingController: NSObject, ObservableObject {
                 width: pickedFilter.contentRect.width * scale,
                 height: pickedFilter.contentRect.height * scale
             )
-            // Rebuild display filters so the camera overlay stays excluded;
-            // other filter styles never include it anyway. Identity comes from
-            // the filter's own includedDisplays — never frame matching.
-            if pickedFilter.style == .display, let display = pickedFilter.includedDisplays.first {
-                let excludedWindows: [SCWindow]
-                if let overlayWindow,
-                   let windowNumber = overlayWindow.windowNumber,
-                   let overlaySCWindow = content.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
-                    excludedWindows = [overlaySCWindow]
-                } else {
-                    excludedWindows = []
-                }
-                filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
+            // Rebuild display filters only when the camera overlay must be
+            // excluded — a rebuilt filter loses the picker's consent and macOS
+            // prompts to "bypass the system picker". Without an overlay the
+            // picked filter is used as-is, so no prompt appears. Identity comes
+            // from the filter's own includedDisplays — never frame matching.
+            if pickedFilter.style == .display,
+               let display = pickedFilter.includedDisplays.first,
+               let overlayWindow,
+               let windowNumber = overlayWindow.windowNumber,
+               let overlaySCWindow = content.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
+                filter = SCContentFilter(display: display, excludingWindows: [overlaySCWindow])
             } else {
                 filter = pickedFilter
             }
