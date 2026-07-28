@@ -244,7 +244,14 @@ final class RecordingController: NSObject, ObservableObject {
     private var cursorSampleSource: DispatchSourceTimer?
     private let cursorSampleQueue = DispatchQueue(label: "app.viewio.cursor-sample", qos: .userInteractive)
     private var cursorEventMonitor: Any?
-    private var keyEventMonitor: Any?
+    /// Listen-only CGEvent tap + run loop source for keystroke timestamps.
+    /// (An NSEvent global key monitor requires Accessibility trust, which App
+    /// Review forbids for this purpose; a listen-only tap works with Input
+    /// Monitoring.)
+    private var keyEventTap: CFMachPort?
+    private var keyEventTapSource: CFRunLoopSource?
+    /// Retained for the tap's userInfo; released in stopKeyEventTap().
+    private var keyEventTapContext: KeyEventTapContext?
     /// Thread-safe buffer so global mouse/key monitors don't flood MainActor
     /// (which froze playhead-driven cursor overlays in other editor windows).
     private let cursorBuffer = CursorTrackBuffer()
@@ -310,11 +317,16 @@ final class RecordingController: NSObject, ObservableObject {
     }
 
     static func requestInputMonitoringAccess() {
-        if !inputMonitoringAccessGranted() {
+        let access = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
+        if access == kIOHIDAccessTypeUnknown {
+            // Not asked yet: IOHIDRequestAccess shows the system prompt.
+            // Don't also open System Settings — the prompt has its own
+            // "Open System Settings" button.
             _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-        }
-        if !inputMonitoringAccessGranted(),
-           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+        } else if access != kIOHIDAccessTypeGranted,
+                  let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            // Previously denied: the prompt won't re-appear, so the pane is
+            // the only way to grant.
             NSWorkspace.shared.open(url)
         }
     }
@@ -1008,13 +1020,12 @@ final class RecordingController: NSObject, ObservableObject {
             self?.cursorBuffer.recordMouseEvent(event)
         }
         // Keystroke times feed the editor's "hide cursor when typing" option.
-        // Global key monitors only fire when the app has Input Monitoring
-        // access — without it this recording just has no typing data
-        // (only timestamps are captured, never key identities). The start
-        // page surfaces the missing permission with a request button.
-        keyEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.cursorBuffer.recordKeyEvent(event)
-        }
+        // A listen-only CGEvent tap fires when the app has Input Monitoring
+        // access (an NSEvent global key monitor would require Accessibility
+        // trust instead). Without the permission the tap isn't created and
+        // the recording just has no typing data — the start page surfaces a
+        // request button.
+        startKeyEventTap()
         // Immediate sample at t≈0 so the first frame is aligned.
         cursorSampleQueue.async { [weak self] in
             self?.cursorBuffer.sampleMouse()
@@ -1029,9 +1040,72 @@ final class RecordingController: NSObject, ObservableObject {
             NSEvent.removeMonitor(cursorEventMonitor)
             self.cursorEventMonitor = nil
         }
-        if let keyEventMonitor {
-            NSEvent.removeMonitor(keyEventMonitor)
-            self.keyEventMonitor = nil
+        stopKeyEventTap()
+    }
+
+    /// Installs a listen-only CGEvent tap that records keystroke timestamps
+    /// (never key identities) into the cursor buffer. The callback runs on
+    /// the main run loop; the buffer is thread-safe.
+    private func startKeyEventTap() {
+        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.tapDisabledByTimeout.rawValue)
+            | (1 << CGEventType.tapDisabledByUserInput.rawValue)
+        let context = KeyEventTapContext(buffer: cursorBuffer)
+        let refcon = Unmanaged.passRetained(context).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: mask,
+            callback: { _, type, event, refcon -> Unmanaged<CGEvent>? in
+                guard let refcon else { return Unmanaged.passUnretained(event) }
+                let ctx = Unmanaged<KeyEventTapContext>.fromOpaque(refcon).takeUnretainedValue()
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    // The system disables slow taps; re-enable and keep going.
+                    if let tap = ctx.tap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
+                if type == .keyDown {
+                    // CGEvent.timestamp is nanoseconds since boot — same clock
+                    // as NSEvent.timestamp / ProcessInfo.systemUptime (seconds).
+                    ctx.buffer.recordKeyEvent(uptime: TimeInterval(event.timestamp) / 1_000_000_000)
+                }
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: refcon
+        ) else {
+            // No Input Monitoring access — record without typing data.
+            Unmanaged<KeyEventTapContext>.fromOpaque(refcon).release()
+            return
+        }
+        context.tap = tap
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            Unmanaged<KeyEventTapContext>.fromOpaque(refcon).release()
+            return
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        keyEventTap = tap
+        keyEventTapSource = source
+        keyEventTapContext = context
+    }
+
+    private func stopKeyEventTap() {
+        if let keyEventTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), keyEventTapSource, .commonModes)
+            self.keyEventTapSource = nil
+        }
+        if let keyEventTap {
+            CGEvent.tapEnable(tap: keyEventTap, enable: false)
+            CFMachPortInvalidate(keyEventTap)
+            self.keyEventTap = nil
+        }
+        if let keyEventTapContext {
+            // Balance the passRetained made for the tap's userInfo.
+            Unmanaged.passUnretained(keyEventTapContext).release()
+            self.keyEventTapContext = nil
         }
     }
 
@@ -1289,6 +1363,17 @@ private enum RecordingError: LocalizedError {
 /// without hopping onto MainActor for every mouse move. That keeps editor
 /// playhead updates (and the live cursor overlay) responsive while another
 /// window is recording.
+/// Shared state for the keystroke CGEvent tap: the buffer to write into and
+/// the tap itself (so it can be re-enabled if the system disables it).
+private final class KeyEventTapContext {
+    let buffer: CursorTrackBuffer
+    var tap: CFMachPort?
+
+    init(buffer: CursorTrackBuffer) {
+        self.buffer = buffer
+    }
+}
+
 private final class CursorTrackBuffer: @unchecked Sendable {
     struct Snapshot {
         var positions: [CursorPosition]
@@ -1370,11 +1455,14 @@ private final class CursorTrackBuffer: @unchecked Sendable {
         }
     }
 
-    func recordKeyEvent(_ event: NSEvent) {
+    /// Records a keystroke by its uptime (seconds since boot — the
+    /// NSEvent.timestamp / CGEvent.timestamp clock). Only the time is kept,
+    /// never which key was pressed.
+    func recordKeyEvent(uptime: TimeInterval) {
         lock.lock()
         defer { lock.unlock() }
         guard let hostStart else { return }
-        let time = max(0, event.timestamp - hostStart)
+        let time = max(0, uptime - hostStart)
         keys.append(KeyEvent(time: time))
     }
 
