@@ -16,9 +16,9 @@ viewio ships through two channels, selected by scheme:
   sandbox (`viewio/viewio-direct.entitlements`), hardened runtime for
   notarization. This is the DMG flow documented below.
 
-The main differences are in the Accessibility-permission flow: sandboxed
-builds open System Settings for a manual "+" add, direct builds show the
-system prompt (`#if APP_STORE` in `RecordingController.swift`).
+Both channels share the same permission flow: typing detection (for
+"hide cursor while typing") uses Input Monitoring, requested at runtime
+via `IOHIDRequestAccess` (`RecordingController.swift`).
 
 Each scheme runs its channel's behavior even while developing: `viewio
 (App Store)` runs the sandboxed `Debug` configuration, `viewio (Direct)`

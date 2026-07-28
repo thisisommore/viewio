@@ -3,8 +3,7 @@
 <plist version="1.0">
 <!-- Direct (Developer ID) distribution: no App Sandbox, so no sandbox-scoped
      entitlements are needed. Hardened runtime is on for notarization, and
-     accessibility trust is requested at runtime via
-     AXIsProcessTrustedWithOptions. -->
+     Input Monitoring access is requested at runtime via IOHIDRequestAccess. -->
 <dict>
 </dict>
 </plist>

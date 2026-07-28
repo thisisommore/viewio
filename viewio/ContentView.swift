@@ -148,8 +148,8 @@ private struct RecordingStartView: View {
                         errorBanner(message: errorMessage)
                     }
 
-                    if !recorder.isAccessibilityTrusted {
-                        accessibilityBanner
+                    if !recorder.isInputMonitoringGranted {
+                        inputMonitoringBanner
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
@@ -270,19 +270,19 @@ private struct RecordingStartView: View {
 
     /// Warns that keystroke capture (for "hide cursor while typing") is off.
     /// Optional permission — recording itself works without it.
-    private var accessibilityBanner: some View {
+    private var inputMonitoringBanner: some View {
         HStack(spacing: 12) {
             Image(systemName: "keyboard")
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Accessibility access is off")
-                Text("Needed to detect typing for the “hide cursor while typing” effect. Optional — recording works without it. \(RecordingController.accessibilityInstructions)")
+                Text("Input Monitoring is off")
+                Text("Needed to detect typing for the “hide cursor while typing” effect. Optional — recording works without it. \(RecordingController.inputMonitoringInstructions)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
-            Button(RecordingController.accessibilityButtonTitle, action: recorder.requestAccessibilityAccess)
+            Button(RecordingController.inputMonitoringButtonTitle, action: recorder.requestInputMonitoringAccess)
         }
         .font(.callout)
         .padding(14)
@@ -2159,20 +2159,20 @@ private struct CursorInspectorPanel: View {
                     .disabled(!model.cursorSettings.isEnabled || !model.hasKeyData)
                 }
                 if !model.hasKeyData {
-                    Text("No typing data in this recording. New recordings capture keystrokes when Accessibility access is granted.")
+                    Text("No typing data in this recording. New recordings capture keystrokes when Input Monitoring is enabled.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if !AXIsProcessTrusted() {
+                if !RecordingController.inputMonitoringAccessGranted() {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Typing detection needs Accessibility access to capture keystrokes for “hide while typing” — optional, everything else works without it. \(RecordingController.accessibilityInstructions)")
+                        Text("Typing detection needs Input Monitoring to capture keystrokes for “hide while typing” — optional, everything else works without it. \(RecordingController.inputMonitoringInstructions)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        Button(RecordingController.accessibilityButtonTitle) {
-                            RecordingController.requestAccessibilityAccess()
+                        Button(RecordingController.inputMonitoringButtonTitle) {
+                            RecordingController.requestInputMonitoringAccess()
                         }
                         .controlSize(.small)
                     }

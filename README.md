@@ -23,7 +23,7 @@
 - **Cinematic auto zoom** - clusters clicks and dwells into smooth focus scenes (inspired by tools like Screen Studio)
 - **Manual zoom ranges** - amount, entry/exit easing, follow-cursor or fixed focus
 - **Cursor redesign** - native macOS styles plus custom looks, size, motion, click effects
-- **Hide cursor while typing** - keystroke timing only (optional Accessibility permission)
+- **Hide cursor while typing** - keystroke timing only (optional Input Monitoring permission)
 - **Motion blur** - trails on cursor and zoom camera moves
 - **Backgrounds / wallpapers** - bundled abstract backgrounds or a session custom image
 - **Clips & speed** - trim and retime segments before export
@@ -56,7 +56,7 @@ Cut, zoom, restyle the cursor, and drop in a background - without leaving the ap
 | **Platform** | macOS (deployment target currently **26.0** - see Xcode project) |
 | **Architecture** | Apple Silicon recommended; release DMG is arm64-only by default |
 | **Xcode** | Recent Xcode with SwiftUI + ScreenCaptureKit |
-| **Permissions** | Screen Recording (required); Microphone / Camera if enabled; Accessibility (optional, hide-cursor-while-typing) |
+| **Permissions** | Screen Recording (required); Microphone / Camera if enabled; Input Monitoring (optional, hide-cursor-while-typing) |
 
 ---
 
@@ -123,7 +123,7 @@ viewio/
 ## Privacy notes
 
 - **Screen Recording** is required to capture the display or window.
-- **Accessibility** is only used for keystroke *timing* so the cursor can hide while typing - which keys you press are not stored.
+- **Input Monitoring** is only used for keystroke *timing* so the cursor can hide while typing - which keys you press are not stored.
 - Camera and microphone are only used when you enable them for a recording.
 
 ---

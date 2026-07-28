@@ -7,6 +7,7 @@ import AppKit
 import AVFoundation
 import Combine
 import Foundation
+import IOKit.hid
 @preconcurrency import ScreenCaptureKit
 
 struct AudioDevice: Identifiable, Equatable {
@@ -250,10 +251,11 @@ final class RecordingController: NSObject, ObservableObject {
     private var recordedDisplayID: CGDirectDisplayID?
     /// Global Cocoa bounds (points, origin bottom-left) of the captured display.
     private var captureBounds: CGRect = .zero
-    /// Live Accessibility trust state, refreshed so the start page can warn
-    /// that typing detection ("hide cursor while typing") won't capture keys.
-    @Published private(set) var isAccessibilityTrusted = AXIsProcessTrusted()
-    private var accessibilityTimer: Timer?
+    /// Live Input Monitoring authorization state, refreshed so the start page
+    /// can warn that typing detection ("hide cursor while typing") won't
+    /// capture keys.
+    @Published private(set) var isInputMonitoringGranted = RecordingController.inputMonitoringAccessGranted()
+    private var inputMonitoringTimer: Timer?
     /// Host time when capture is considered started (aligns cursor track to video).
     private var recordingHostStart: TimeInterval?
     /// When set, stop/finish callbacks delete partial files and return to idle.
@@ -277,59 +279,50 @@ final class RecordingController: NSObject, ObservableObject {
         discoverCameras()
         discoverMicrophones()
         configureContentPicker()
-#if !APP_STORE
-        if !AXIsProcessTrusted() {
-            // Direct (non-sandboxed) builds can self-register in System
-            // Settings → Accessibility. The system prompt is shown at most
-            // once; later calls are silent no-ops while untrusted.
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
-        }
-#endif
-        // Sandboxed (App Store) builds cannot self-register — the user must
-        // add the app with "+" in the pane. Either way, track the live trust
-        // state here; the banner buttons trigger the right flow per channel.
-        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        // Input Monitoring consent is requested from the banner / editor
+        // buttons (no prompt at launch). Track the live authorization state
+        // here so the UI can surface it.
+        inputMonitoringTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.refreshAccessibilityTrust()
+                self?.refreshInputMonitoringAccess()
             }
         }
     }
 
-    private func refreshAccessibilityTrust() {
-        let trusted = AXIsProcessTrusted()
-        guard trusted != isAccessibilityTrusted else { return }
-        isAccessibilityTrusted = trusted
+    private func refreshInputMonitoringAccess() {
+        let granted = RecordingController.inputMonitoringAccessGranted()
+        guard granted != isInputMonitoringGranted else { return }
+        isInputMonitoringGranted = granted
     }
 
-    /// App Store builds are sandboxed and cannot self-register in System
-    /// Settings → Accessibility — AXIsProcessTrustedWithOptions is a silent
-    /// no-op — so the button opens the pane for a manual "+" add. Direct
-    /// (non-sandboxed) builds show the system prompt, which adds the app to
-    /// the list automatically.
-#if APP_STORE
-    static let accessibilityButtonTitle = "Open Accessibility Settings…"
-    static let accessibilityInstructions = "To enable: open the settings and add viewio with the “+” button."
-#else
-    static let accessibilityButtonTitle = "Enable Accessibility…"
-    static let accessibilityInstructions = "macOS will ask to allow viewio to control this computer — approve it in the prompt."
-#endif
+    /// Input Monitoring (System Settings → Privacy & Security → Input
+    /// Monitoring) is the permission macOS requires to listen to global key
+    /// events. It is not an Accessibility feature, so using it for keystroke
+    /// timing does not fall under App Store guideline 2.4.5.
+    /// IOHIDRequestAccess shows the system prompt (works for both sandboxed
+    /// and direct builds); if the prompt was already answered, the pane is
+    /// opened so the user can flip the switch manually.
+    static let inputMonitoringButtonTitle = "Enable Input Monitoring…"
+    static let inputMonitoringInstructions = "Allow viewio in System Settings → Privacy & Security → Input Monitoring."
 
-    static func requestAccessibilityAccess() {
-#if !APP_STORE
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-#endif
-        if !AXIsProcessTrusted(),
-           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+    static func inputMonitoringAccessGranted() -> Bool {
+        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+    }
+
+    static func requestInputMonitoringAccess() {
+        if !inputMonitoringAccessGranted() {
+            _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        }
+        if !inputMonitoringAccessGranted(),
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
             NSWorkspace.shared.open(url)
         }
     }
 
-    /// Instance wrapper that also refreshes the published trust state.
-    func requestAccessibilityAccess() {
-        RecordingController.requestAccessibilityAccess()
-        isAccessibilityTrusted = AXIsProcessTrusted()
+    /// Instance wrapper that also refreshes the published state.
+    func requestInputMonitoringAccess() {
+        RecordingController.requestInputMonitoringAccess()
+        isInputMonitoringGranted = RecordingController.inputMonitoringAccessGranted()
     }
 
     func startRecording() {
@@ -456,7 +449,7 @@ final class RecordingController: NSObject, ObservableObject {
     deinit {
         // Timers / picker cleanup: RecordingController lives on the main actor;
         // window teardown also runs there for StateObject.
-        accessibilityTimer?.invalidate()
+        inputMonitoringTimer?.invalidate()
         SCContentSharingPicker.shared.remove(self)
     }
 
@@ -1015,8 +1008,8 @@ final class RecordingController: NSObject, ObservableObject {
             self?.cursorBuffer.recordMouseEvent(event)
         }
         // Keystroke times feed the editor's "hide cursor when typing" option.
-        // Global key monitors only fire when the app is trusted for
-        // Accessibility — without it this recording just has no typing data
+        // Global key monitors only fire when the app has Input Monitoring
+        // access — without it this recording just has no typing data
         // (only timestamps are captured, never key identities). The start
         // page surfaces the missing permission with a request button.
         keyEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
