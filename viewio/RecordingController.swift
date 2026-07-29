@@ -244,25 +244,29 @@ final class RecordingController: NSObject, ObservableObject {
     private var cursorSampleSource: DispatchSourceTimer?
     private let cursorSampleQueue = DispatchQueue(label: "app.viewio.cursor-sample", qos: .userInteractive)
     private var cursorEventMonitor: Any?
+#if !APP_STORE
     /// Listen-only CGEvent tap + run loop source for keystroke timestamps.
-    /// (An NSEvent global key monitor requires Accessibility trust, which App
-    /// Review forbids for this purpose; a listen-only tap works with Input
-    /// Monitoring.)
+    /// Direct builds only: App Review forbids Input Monitoring for Mac App
+    /// Store apps (guideline 2.4.5(v)), so typing detection is compiled out
+    /// of App Store builds entirely.
     private var keyEventTap: CFMachPort?
     private var keyEventTapSource: CFRunLoopSource?
     /// Retained for the tap's userInfo; released in stopKeyEventTap().
     private var keyEventTapContext: KeyEventTapContext?
+#endif
     /// Thread-safe buffer so global mouse/key monitors don't flood MainActor
     /// (which froze playhead-driven cursor overlays in other editor windows).
     private let cursorBuffer = CursorTrackBuffer()
     private var recordedDisplayID: CGDirectDisplayID?
     /// Global Cocoa bounds (points, origin bottom-left) of the captured display.
     private var captureBounds: CGRect = .zero
+#if !APP_STORE
     /// Live Input Monitoring authorization state, refreshed so the start page
     /// can warn that typing detection ("hide cursor while typing") won't
-    /// capture keys.
+    /// capture keys. (Direct builds only — see keyEventTap above.)
     @Published private(set) var isInputMonitoringGranted = RecordingController.inputMonitoringAccessGranted()
     private var inputMonitoringTimer: Timer?
+#endif
     /// Host time when capture is considered started (aligns cursor track to video).
     private var recordingHostStart: TimeInterval?
     /// When set, stop/finish callbacks delete partial files and return to idle.
@@ -286,6 +290,7 @@ final class RecordingController: NSObject, ObservableObject {
         discoverCameras()
         discoverMicrophones()
         configureContentPicker()
+#if !APP_STORE
         // Input Monitoring consent is requested from the banner / editor
         // buttons (no prompt at launch). Track the live authorization state
         // here so the UI can surface it.
@@ -294,8 +299,10 @@ final class RecordingController: NSObject, ObservableObject {
                 self?.refreshInputMonitoringAccess()
             }
         }
+#endif
     }
 
+#if !APP_STORE
     private func refreshInputMonitoringAccess() {
         let granted = RecordingController.inputMonitoringAccessGranted()
         guard granted != isInputMonitoringGranted else { return }
@@ -304,11 +311,12 @@ final class RecordingController: NSObject, ObservableObject {
 
     /// Input Monitoring (System Settings → Privacy & Security → Input
     /// Monitoring) is the permission macOS requires to listen to global key
-    /// events. It is not an Accessibility feature, so using it for keystroke
-    /// timing does not fall under App Store guideline 2.4.5.
-    /// IOHIDRequestAccess shows the system prompt (works for both sandboxed
-    /// and direct builds); if the prompt was already answered, the pane is
-    /// opened so the user can flip the switch manually.
+    /// events. Typing detection exists in direct builds only: App Review
+    /// rejected both Accessibility (2.4.5) and Input Monitoring (2.4.5(v))
+    /// for this feature on the Mac App Store, so App Store builds compile
+    /// all of this out.
+    /// IOHIDRequestAccess shows the system prompt; if the prompt was already
+    /// answered, the pane is opened so the user can flip the switch manually.
     static let inputMonitoringButtonTitle = "Enable Input Monitoring…"
     static let inputMonitoringInstructions = "Allow viewio in System Settings → Privacy & Security → Input Monitoring."
 
@@ -336,6 +344,7 @@ final class RecordingController: NSObject, ObservableObject {
         RecordingController.requestInputMonitoringAccess()
         isInputMonitoringGranted = RecordingController.inputMonitoringAccessGranted()
     }
+#endif
 
     func startRecording() {
         guard !isRecording else { return }
@@ -461,7 +470,9 @@ final class RecordingController: NSObject, ObservableObject {
     deinit {
         // Timers / picker cleanup: RecordingController lives on the main actor;
         // window teardown also runs there for StateObject.
+#if !APP_STORE
         inputMonitoringTimer?.invalidate()
+#endif
         SCContentSharingPicker.shared.remove(self)
     }
 
@@ -1019,13 +1030,16 @@ final class RecordingController: NSObject, ObservableObject {
         cursorEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] event in
             self?.cursorBuffer.recordMouseEvent(event)
         }
+#if !APP_STORE
         // Keystroke times feed the editor's "hide cursor when typing" option.
         // A listen-only CGEvent tap fires when the app has Input Monitoring
         // access (an NSEvent global key monitor would require Accessibility
         // trust instead). Without the permission the tap isn't created and
         // the recording just has no typing data — the start page surfaces a
-        // request button.
+        // request button. App Store builds skip this entirely: App Review
+        // forbids Input Monitoring there (guideline 2.4.5(v)).
         startKeyEventTap()
+#endif
         // Immediate sample at t≈0 so the first frame is aligned.
         cursorSampleQueue.async { [weak self] in
             self?.cursorBuffer.sampleMouse()
@@ -1040,9 +1054,12 @@ final class RecordingController: NSObject, ObservableObject {
             NSEvent.removeMonitor(cursorEventMonitor)
             self.cursorEventMonitor = nil
         }
+#if !APP_STORE
         stopKeyEventTap()
+#endif
     }
 
+#if !APP_STORE
     /// Installs a listen-only CGEvent tap that records keystroke timestamps
     /// (never key identities) into the cursor buffer. The callback runs on
     /// the main run loop; the buffer is thread-safe.
@@ -1108,6 +1125,7 @@ final class RecordingController: NSObject, ObservableObject {
             self.keyEventTapContext = nil
         }
     }
+#endif
 
     private func saveCursorTrack(for videoURL: URL) {
         let snapshot = cursorBuffer.snapshot()
@@ -1363,6 +1381,7 @@ private enum RecordingError: LocalizedError {
 /// without hopping onto MainActor for every mouse move. That keeps editor
 /// playhead updates (and the live cursor overlay) responsive while another
 /// window is recording.
+#if !APP_STORE
 /// Shared state for the keystroke CGEvent tap: the buffer to write into and
 /// the tap itself (so it can be re-enabled if the system disables it).
 private final class KeyEventTapContext {
@@ -1373,6 +1392,7 @@ private final class KeyEventTapContext {
         self.buffer = buffer
     }
 }
+#endif
 
 private final class CursorTrackBuffer: @unchecked Sendable {
     struct Snapshot {

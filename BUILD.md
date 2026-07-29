@@ -16,9 +16,12 @@ viewio ships through two channels, selected by scheme:
   sandbox (`viewio/viewio-direct.entitlements`), hardened runtime for
   notarization. This is the DMG flow documented below.
 
-Both channels share the same permission flow: typing detection (for
-"hide cursor while typing") uses Input Monitoring, requested at runtime
-via `IOHIDRequestAccess` (`RecordingController.swift`).
+The typing-detection feature ("hide cursor while typing") exists only in
+direct builds: App Review forbids both Accessibility (2.4.5) and Input
+Monitoring (2.4.5(v)) for it on the Mac App Store, so App Store builds
+compile it out (`#if !APP_STORE` in `RecordingController.swift` and
+`ContentView.swift`). In direct builds it uses a listen-only CGEvent tap
+gated by Input Monitoring, requested at runtime via `IOHIDRequestAccess`.
 
 Each scheme runs its channel's behavior even while developing: `viewio
 (App Store)` runs the sandboxed `Debug` configuration, `viewio (Direct)`

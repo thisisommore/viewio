@@ -148,9 +148,11 @@ private struct RecordingStartView: View {
                         errorBanner(message: errorMessage)
                     }
 
+#if !APP_STORE
                     if !recorder.isInputMonitoringGranted {
                         inputMonitoringBanner
                     }
+#endif
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("New Recording")
@@ -268,8 +270,10 @@ private struct RecordingStartView: View {
         }
     }
 
+#if !APP_STORE
     /// Warns that keystroke capture (for "hide cursor while typing") is off.
     /// Optional permission — recording itself works without it.
+    /// (Direct builds only; App Store builds compile typing detection out.)
     private var inputMonitoringBanner: some View {
         HStack(spacing: 12) {
             Image(systemName: "keyboard")
@@ -292,6 +296,7 @@ private struct RecordingStartView: View {
                 .stroke(Color.primary.opacity(0.15))
         }
     }
+#endif
 }
 
 private struct RecordButtonStyle: ButtonStyle {
@@ -2142,22 +2147,16 @@ private struct CursorInspectorPanel: View {
                 }
 
                 sectionLabel("Behavior")
-                HStack {
-                    Text("Hide while typing")
-                        .font(.callout)
-                    Spacer()
-                    Toggle(
-                        "Hide while typing",
-                        isOn: Binding(
-                            get: { model.cursorSettings.hideWhenTyping },
-                            set: model.setCursorHideWhenTyping
-                        )
-                    )
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .disabled(!model.cursorSettings.isEnabled || !model.hasKeyData)
+#if APP_STORE
+                // App Store builds can't capture typing data (App Review
+                // guideline 2.4.5(v)); the toggle only applies to projects
+                // that already carry keys.json (recorded with a direct
+                // build), so it stays hidden otherwise.
+                if model.hasKeyData {
+                    hideWhileTypingRow
                 }
+#else
+                hideWhileTypingRow
                 if !model.hasKeyData {
                     Text("No typing data in this recording. New recordings capture keystrokes when Input Monitoring is enabled.")
                         .font(.caption)
@@ -2177,11 +2176,31 @@ private struct CursorInspectorPanel: View {
                         .controlSize(.small)
                     }
                 }
+#endif
 
                 motionBlurSection
             }
         }
         .opacity(model.hasCursorData && !model.cursorSettings.isEnabled ? 0.85 : 1)
+    }
+
+    private var hideWhileTypingRow: some View {
+        HStack {
+            Text("Hide while typing")
+                .font(.callout)
+            Spacer()
+            Toggle(
+                "Hide while typing",
+                isOn: Binding(
+                    get: { model.cursorSettings.hideWhenTyping },
+                    set: model.setCursorHideWhenTyping
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .labelsHidden()
+            .disabled(!model.cursorSettings.isEnabled || !model.hasKeyData)
+        }
     }
 
     @ViewBuilder

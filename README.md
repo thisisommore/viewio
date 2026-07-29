@@ -23,7 +23,7 @@
 - **Cinematic auto zoom** - clusters clicks and dwells into smooth focus scenes (inspired by tools like Screen Studio)
 - **Manual zoom ranges** - amount, entry/exit easing, follow-cursor or fixed focus
 - **Cursor redesign** - native macOS styles plus custom looks, size, motion, click effects
-- **Hide cursor while typing** - keystroke timing only (optional Input Monitoring permission)
+- **Hide cursor while typing** - keystroke timing only; requires Input Monitoring, which App Review forbids on the Mac App Store (guideline 2.4.5(v)), so this is only in the direct build
 - **Motion blur** - trails on cursor and zoom camera moves
 - **Backgrounds / wallpapers** - bundled abstract backgrounds or a session custom image
 - **Clips & speed** - trim and retime segments before export
@@ -56,7 +56,7 @@ Cut, zoom, restyle the cursor, and drop in a background - without leaving the ap
 | **Platform** | macOS (deployment target currently **26.0** - see Xcode project) |
 | **Architecture** | Apple Silicon recommended; release DMG is arm64-only by default |
 | **Xcode** | Recent Xcode with SwiftUI + ScreenCaptureKit |
-| **Permissions** | Screen Recording (required); Microphone / Camera if enabled; Input Monitoring (optional, hide-cursor-while-typing) |
+| **Permissions** | Screen Recording (required); Microphone / Camera if enabled; Input Monitoring (direct build only, hide-cursor-while-typing) |
 
 ---
 
@@ -123,7 +123,7 @@ viewio/
 ## Privacy notes
 
 - **Screen Recording** is required to capture the display or window.
-- **Input Monitoring** is only used for keystroke *timing* so the cursor can hide while typing - which keys you press are not stored.
+- **Input Monitoring** (direct build only) is only used for keystroke *timing* so the cursor can hide while typing - which keys you press are not stored. The App Store build has no typing detection.
 - Camera and microphone are only used when you enable them for a recording.
 
 ---
