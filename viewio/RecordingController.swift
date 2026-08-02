@@ -367,37 +367,20 @@ final class RecordingController: NSObject, ObservableObject {
     }
 
     /// Screen Recording consent from the Permissions icon.
-    /// First tap shows only the system prompt (which has its own Settings
-    /// button). Later taps open System Settings, since the prompt won't
-    /// reappear after deny. Never open Settings alongside the first prompt.
-    private static let didRequestScreenRecordingKey = "didRequestScreenRecordingAccess"
-
+    /// Only shows the system TCC dialog (`CGRequestScreenCaptureAccess`).
+    /// Never opens System Settings ourselves — that dialog already has
+    /// "Open System Settings", and opening the pane ourselves caused a
+    /// double-window race (Settings + prompt).
     func requestScreenRecordingAccess() {
         print("PERM: requestScreenRecordingAccess tapped (preflight=\(CGPreflightScreenCaptureAccess()))")
         if CGPreflightScreenCaptureAccess() {
             isScreenRecordingGranted = true
             return
         }
-
-        let alreadyAsked = UserDefaults.standard.bool(forKey: Self.didRequestScreenRecordingKey)
-        if !alreadyAsked {
-            // First request: system dialog only. CGRequest returns false while
-            // the alert is still up — do not treat that as "open Settings".
-            UserDefaults.standard.set(true, forKey: Self.didRequestScreenRecordingKey)
-            let granted = CGRequestScreenCaptureAccess()
-            print("PERM: CGRequestScreenCaptureAccess returned \(granted)")
-            if granted {
-                isScreenRecordingGranted = true
-            }
-            refreshScreenRecordingAccess()
-            return
-        }
-
-        // Already asked once: prompt won't reappear; open Settings so the
-        // user can flip the toggle (may need relaunch after granting).
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-            print("PERM: opening System Settings Screen Recording pane")
-            NSWorkspace.shared.open(url)
+        let granted = CGRequestScreenCaptureAccess()
+        print("PERM: CGRequestScreenCaptureAccess returned \(granted)")
+        if granted || CGPreflightScreenCaptureAccess() {
+            isScreenRecordingGranted = true
         }
         refreshScreenRecordingAccess()
     }
