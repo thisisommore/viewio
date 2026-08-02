@@ -44,6 +44,7 @@ struct WindowInfo: Identifiable, Equatable {
 enum CaptureMode: String, Codable, CaseIterable, Identifiable {
     case display
     case window
+    case region
 
     var id: String { rawValue }
 
@@ -51,6 +52,7 @@ enum CaptureMode: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .display: "Full Screen"
         case .window: "Window"
+        case .region: "Region"
         }
     }
 }
@@ -227,10 +229,20 @@ final class RecordingController: NSObject, ObservableObject {
     @Published private(set) var pickedFilter: SCContentFilter?
     /// Best-effort display name of the picked content.
     @Published private(set) var pickedContentName: String?
+    /// Screen region chosen through the region selection overlay, in Cocoa
+    /// global point coordinates (same space as `NSEvent.mouseLocation`).
+    /// Setting it switches `captureMode` to `.region` and clears any picker filter.
+    @Published private(set) var selectedRegion: CGRect?
+    private var regionSelector: RegionSelectionWindowController?
     /// Shows the confirmation alert before discarding a finished recording.
     @Published var showsDiscardRecordingConfirmation = false
     /// True while an in-progress recording is being torn down without saving.
     @Published private(set) var isDiscarding = false
+    /// Live Screen Recording (TCC) authorization state, refreshed on a timer
+    /// so the start page can warn before ScreenCaptureKit calls re-trigger the
+    /// system prompt. All ScreenCaptureKit entry points are gated on this.
+    @Published private(set) var isScreenRecordingGranted = RecordingController.screenRecordingAccessGranted()
+    private var screenRecordingTimer: Timer?
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -290,6 +302,14 @@ final class RecordingController: NSObject, ObservableObject {
         discoverCameras()
         discoverMicrophones()
         configureContentPicker()
+        // Track the live Screen Recording authorization state so the UI can
+        // surface it and ScreenCaptureKit calls stay gated (every ungated
+        // SCShareableContent call can re-trigger the system prompt).
+        screenRecordingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshScreenRecordingAccess()
+            }
+        }
 #if !APP_STORE
         // Input Monitoring consent is requested from the banner / editor
         // buttons (no prompt at launch). Track the live authorization state
@@ -300,6 +320,56 @@ final class RecordingController: NSObject, ObservableObject {
             }
         }
 #endif
+    }
+
+    // MARK: - Screen Recording permission (TCC)
+
+    /// Preflight check — never prompts. Gate every ScreenCaptureKit call on
+    /// this: SCShareableContent/SCStream calls while unauthorized are what
+    /// re-trigger the system "Screen Recording" prompt again and again.
+    static func screenRecordingAccessGranted() -> Bool {
+        let granted = CGPreflightScreenCaptureAccess()
+        print("PERM: preflight screen recording = \(granted)")
+        return granted
+    }
+
+    private func refreshScreenRecordingAccess() {
+        let granted = CGPreflightScreenCaptureAccess()
+        guard granted != isScreenRecordingGranted else { return }
+        print("PERM: screen recording access changed -> \(granted)")
+        isScreenRecordingGranted = granted
+    }
+
+    /// Shows the system prompt (only when undetermined); when previously
+    /// denied, macOS returns false without prompting, so open the Settings
+    /// pane instead. Granting may require relaunching the app to take effect.
+    func requestScreenRecordingAccess() {
+        print("PERM: requestScreenRecordingAccess tapped (preflight=\(CGPreflightScreenCaptureAccess()))")
+        if !CGPreflightScreenCaptureAccess() {
+            let granted = CGRequestScreenCaptureAccess()
+            print("PERM: CGRequestScreenCaptureAccess returned \(granted)")
+            if granted {
+                isScreenRecordingGranted = true
+                return
+            }
+        }
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            print("PERM: opening System Settings Screen Recording pane")
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Async gate used before recording starts: asks once from the explicit
+    /// Start action instead of letting ScreenCaptureKit prompt mid-capture.
+    /// Returns true when capture may proceed.
+    private func ensureScreenRecordingAccess() async -> Bool {
+        if CGPreflightScreenCaptureAccess() { return true }
+        print("PERM: screen recording not granted at startRecording — requesting")
+        let granted = await Task.detached { CGRequestScreenCaptureAccess() }.value
+        print("PERM: startRecording request returned \(granted), preflight=\(CGPreflightScreenCaptureAccess())")
+        let allowed = granted || CGPreflightScreenCaptureAccess()
+        isScreenRecordingGranted = allowed
+        return allowed
     }
 
 #if !APP_STORE
@@ -362,6 +432,13 @@ final class RecordingController: NSObject, ObservableObject {
 
         Task {
             do {
+                if shouldAbortStart() { return }
+                // Gate ScreenCaptureKit on TCC up front — unauthorized
+                // SCShareableContent/SCStream calls re-trigger the system
+                // prompt (sometimes repeatedly) instead of failing cleanly.
+                guard await ensureScreenRecordingAccess() else {
+                    throw RecordingError.screenRecordingDenied
+                }
                 if shouldAbortStart() { return }
                 if captureMicrophone {
                     let authorized = await requestMicrophoneAuthorization()
@@ -459,6 +536,32 @@ final class RecordingController: NSObject, ObservableObject {
         picker.present()
     }
 
+    /// Shows the fullscreen drag-to-select overlay for region capture.
+    /// Confirming switches to `.region` mode; cancelling leaves the setup unchanged.
+    func presentRegionSelector() {
+        guard regionSelector == nil else { return }
+        let selector = RegionSelectionWindowController { [weak self] rect in
+            guard let self else { return }
+            self.regionSelector = nil
+            if let rect {
+                self.selectedRegion = rect
+                self.captureMode = .region
+                self.pickedFilter = nil
+                self.pickedContentName = nil
+            }
+        }
+        regionSelector = selector
+        selector.show()
+    }
+
+    /// Clears the selected region, falling back to full-screen capture.
+    func clearSelectedRegion() {
+        selectedRegion = nil
+        if captureMode == .region {
+            captureMode = .display
+        }
+    }
+
     private func configureContentPicker() {
         let picker = SCContentSharingPicker.shared
         var configuration = picker.configuration ?? SCContentSharingPickerConfiguration()
@@ -470,6 +573,7 @@ final class RecordingController: NSObject, ObservableObject {
     deinit {
         // Timers / picker cleanup: RecordingController lives on the main actor;
         // window teardown also runs there for StateObject.
+        screenRecordingTimer?.invalidate()
 #if !APP_STORE
         inputMonitoringTimer?.invalidate()
 #endif
@@ -481,6 +585,7 @@ final class RecordingController: NSObject, ObservableObject {
     private func applyPickedFilter(_ filter: SCContentFilter) async {
         pickedFilter = filter
         captureMode = filter.style == .window ? .window : .display
+        selectedRegion = nil
 
         // The filter's own included content is the only reliable identity —
         // contentRect can lack the global origin for display picks.
@@ -498,6 +603,12 @@ final class RecordingController: NSObject, ObservableObject {
         }
 
         // Fallback: match live shareable content by frame (best effort, UI only).
+        // Skipped without Screen Recording access — the call would just prompt.
+        guard CGPreflightScreenCaptureAccess() else {
+            print("PERM: skipping picked-filter fallback lookup — screen recording not granted")
+            pickedContentName = nil
+            return
+        }
         guard let content = try? await SCShareableContent.current else {
             pickedContentName = nil
             return
@@ -624,6 +735,7 @@ final class RecordingController: NSObject, ObservableObject {
         if discardRequested || captureTeardownHandled {
             throw CancellationError()
         }
+        print("PERM: configureAndStartCapture, mode=\(captureMode.rawValue), preflight=\(CGPreflightScreenCaptureAccess())")
         let content = try await SCShareableContent.current
         if discardRequested || captureTeardownHandled {
             throw CancellationError()
@@ -651,6 +763,13 @@ final class RecordingController: NSObject, ObservableObject {
             capturedWindow = window
             captureBounds = cocoaFrame(forWindowFrame: window.frame)
             targetDisplayID = displayIDContainingWindow(frameInCGSpace: window.frame) ?? displays[0].displayID
+        } else if captureMode == .region, let selectedRegion {
+            // Region capture: bounds are the chosen rect itself so the cursor
+            // track normalizes against exactly what is recorded.
+            capturedWindow = nil
+            captureBounds = selectedRegion
+            let regionInCGSpace = cgFrame(forCocoaFrame: selectedRegion)
+            targetDisplayID = displayIDContainingWindow(frameInCGSpace: regionInCGSpace) ?? displays[0].displayID
         } else {
             capturedWindow = nil
             let display: SCDisplay
@@ -705,6 +824,9 @@ final class RecordingController: NSObject, ObservableObject {
         // the chosen window, so the overlay is naturally omitted.
         let filter: SCContentFilter
         let nativeSize: CGSize
+        /// Region capture only: sub-rect of the display to stream, applied to
+        /// `configuration.sourceRect` once the configuration exists.
+        var regionSourceRect: CGRect?
         if let pickedFilter {
             let scale = CGFloat(pickedFilter.pointPixelScale)
             nativeSize = CGSize(
@@ -740,6 +862,42 @@ final class RecordingController: NSObject, ObservableObject {
                 width: max(nativeFromFilter.width, nativeFromWindow.width),
                 height: max(nativeFromFilter.height, nativeFromWindow.height)
             )
+        } else if captureMode == .region, let selectedRegion {
+            let captureContent = try await SCShareableContent.current
+            let excludedWindows: [SCWindow]
+            if let overlayWindow,
+               let windowNumber = overlayWindow.windowNumber,
+               let overlaySCWindow = captureContent.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
+                excludedWindows = [overlaySCWindow]
+            } else {
+                excludedWindows = []
+            }
+            // The bounds pass already resolved the display containing the region.
+            let display = captureContent.displays.first(where: { $0.displayID == targetDisplayID })
+                ?? captureContent.displays[0]
+            filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
+            let scale = CGFloat(filter.pointPixelScale)
+            nativeSize = CGSize(
+                width: selectedRegion.width * scale,
+                height: selectedRegion.height * scale
+            )
+            // sourceRect is in points in the CAPTURED DISPLAY's coordinate
+            // system — (0,0) at that display's own top-left, not the global
+            // space CGDisplayBounds uses — or stream validation fails with
+            // "contentRect does not contain sourceRect".
+            let displayBounds = CGDisplayBounds(display.displayID)
+            let regionInCGSpace = cgFrame(forCocoaFrame: selectedRegion)
+            let local = regionInCGSpace
+                .offsetBy(dx: -displayBounds.minX, dy: -displayBounds.minY)
+                .intersection(CGRect(origin: .zero, size: displayBounds.size))
+            if local.width >= 2, local.height >= 2 {
+                regionSourceRect = local
+            } else {
+                // Degenerate after clamping — capture the full display rather
+                // than handing the stream an empty sourceRect.
+                print("PERM: region rect degenerate after display-local clamp (\(local)) — capturing full display")
+            }
+            print("PERM: region capture display=\(display.displayID) displayBounds=\(displayBounds) contentRect=\(filter.contentRect) sourceRect=\(String(describing: regionSourceRect)) native=\(nativeSize)")
         } else {
             let captureContent = try await SCShareableContent.current
             let excludedWindows: [SCWindow]
@@ -779,6 +937,9 @@ final class RecordingController: NSObject, ObservableObject {
         // (letterboxing would desync normalized cursor coords from pixels).
         configuration.width = max(2, Int(outputSize.width.rounded()) & ~1)
         configuration.height = max(2, Int(outputSize.height.rounded()) & ~1)
+        if let regionSourceRect {
+            configuration.sourceRect = regionSourceRect
+        }
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: selectedFrameRate.timescale)
         configuration.queueDepth = 8
         // BGRA keeps sharp UI text better than subsampled YUV for screen content.
@@ -909,6 +1070,20 @@ final class RecordingController: NSObject, ObservableObject {
         return CGRect(
             x: frame.origin.x,
             y: cocoaY,
+            width: frame.size.width,
+            height: frame.size.height
+        )
+    }
+
+    /// Inverse of `cocoaFrame(forWindowFrame:)`: Cocoa global point space to
+    /// the top-left origin global space used by `CGDisplayBounds` and
+    /// `SCStreamConfiguration.sourceRect`.
+    private func cgFrame(forCocoaFrame frame: CGRect) -> CGRect {
+        let mainBounds = CGDisplayBounds(CGMainDisplayID())
+        let cgY = mainBounds.height - (frame.origin.y + frame.size.height)
+        return CGRect(
+            x: frame.origin.x,
+            y: cgY,
             width: frame.size.width,
             height: frame.size.height
         )
@@ -1243,6 +1418,13 @@ final class RecordingController: NSObject, ObservableObject {
     }
 
     func discoverWindows() {
+        // Without Screen Recording access this SCShareableContent call only
+        // re-triggers the system prompt — skip until granted.
+        guard CGPreflightScreenCaptureAccess() else {
+            print("PERM: skipping window discovery — screen recording not granted")
+            availableWindows = []
+            return
+        }
         Task {
             do {
                 let content = try await SCShareableContent.current
@@ -1358,6 +1540,7 @@ extension RecordingController: SCContentSharingPickerObserver {
 private enum RecordingError: LocalizedError {
     case noDisplay
     case noWindow
+    case screenRecordingDenied
     case microphoneDenied
     case cameraDenied
 
@@ -1367,6 +1550,8 @@ private enum RecordingError: LocalizedError {
             "No display is available to record."
         case .noWindow:
             "The selected window is no longer available. Choose another window and try again."
+        case .screenRecordingDenied:
+            "Screen Recording access was denied. Enable it in System Settings, then relaunch viewio."
         case .microphoneDenied:
             "Microphone access was denied. Enable it in System Settings to record microphone audio."
         case .cameraDenied:

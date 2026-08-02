@@ -154,6 +154,10 @@ private struct RecordingStartView: View {
                     }
 #endif
 
+                    if !recorder.isScreenRecordingGranted {
+                        screenRecordingBanner
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
                         Text("New Recording")
                             .font(.title2.bold())
@@ -228,6 +232,10 @@ private struct RecordingStartView: View {
                 if let window = recorder.availableWindows.first(where: { $0.id == recorder.selectedWindowID }) {
                     parts.append(window.appName)
                 }
+            case .region:
+                if let region = recorder.selectedRegion {
+                    parts.append("\(Int(region.width.rounded())) × \(Int(region.height.rounded())) pt")
+                }
             }
         }
         parts.append(recorder.selectedResolution.title)
@@ -260,6 +268,32 @@ private struct RecordingStartView: View {
             Button("Dismiss") {
                 onDismissError?()
             }
+        }
+        .font(.callout)
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.primary.opacity(0.15))
+        }
+    }
+
+    /// Warns that Screen Recording (TCC) access is missing. Without it every
+    /// ScreenCaptureKit call re-triggers the system prompt, so recording is
+    /// gated on this permission. Granting may require an app relaunch.
+    private var screenRecordingBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "rectangle.dashed.badge.record")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Screen Recording is off")
+                Text("viewio needs Screen Recording access to capture. After granting it in System Settings, relaunch the app if recording still fails.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button("Enable Screen Recording…", action: recorder.requestScreenRecordingAccess)
         }
         .font(.callout)
         .padding(14)
@@ -319,39 +353,85 @@ private struct CaptureSourceSection: View {
     let isPreparing: Bool
 
     var body: some View {
-        Button(action: recorder.presentContentPicker) {
-            HStack(spacing: 12) {
-                Image(systemName: recorder.captureMode == .window ? "macwindow" : "display")
-                    .font(.system(size: 22))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 28)
+        HStack(spacing: 12) {
+            Button(action: recorder.presentContentPicker) {
+                HStack(spacing: 12) {
+                    Image(systemName: recorder.captureMode == .window ? "macwindow" : "display")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 28)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(selectionName)
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(recorder.captureMode.title)
-                        .font(.caption)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(selectionName)
+                            .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(recorder.captureMode.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 12)
+
+                    Text("Choose…")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.07), in: Capsule())
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(SourcePickerCardStyle())
+            .disabled(isPreparing)
+
+            Button(action: recorder.presentRegionSelector) {
+                HStack(spacing: 12) {
+                    Image(systemName: "crop")
+                        .font(.system(size: 22))
+                        .foregroundStyle(recorder.captureMode == .region ? Color.accentColor : Color.secondary)
+                        .frame(width: 28)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(regionName)
+                            .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
+                        Text(CaptureMode.region.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 12)
+
+                    Text(recorder.captureMode == .region ? "Reselect…" : "Select…")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.07), in: Capsule())
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(SourcePickerCardStyle())
+            .disabled(isPreparing)
+
+            if recorder.captureMode == .region {
+                Button(action: recorder.clearSelectedRegion) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
                         .foregroundStyle(.secondary)
                 }
-
-                Spacer(minLength: 12)
-
-                Text("Choose…")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.primary.opacity(0.07), in: Capsule())
+                .buttonStyle(.plain)
+                .help("Clear region and record the full screen")
+                .disabled(isPreparing)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(RoundedRectangle(cornerRadius: 10))
         }
-        .buttonStyle(SourcePickerCardStyle())
-        .disabled(isPreparing)
     }
 
     private var selectionName: String {
@@ -371,7 +451,16 @@ private struct CaptureSourceSection: View {
                 return "\(window.appName) — \(window.title)"
             }
             return "No window selected"
+        case .region:
+            return "Full Screen"
         }
+    }
+
+    private var regionName: String {
+        if recorder.captureMode == .region, let region = recorder.selectedRegion {
+            return "\(Int(region.width.rounded())) × \(Int(region.height.rounded())) pt"
+        }
+        return "Record part of the screen"
     }
 }
 
@@ -889,6 +978,11 @@ private struct VideoPreview: View {
 
                 // Live cursor overlay — Core Animation tool cannot run on AVPlayerItem.
                 CursorPlayerOverlay(model: model, playerVideoRect: playerVideoRect)
+
+                // Crop editing: full-frame preview + draggable crop rect.
+                if model.isCropEditing {
+                    CropEditingOverlay(model: model, playerVideoRect: playerVideoRect)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -949,6 +1043,29 @@ private struct VideoPreview: View {
     }
 }
 
+/// Resolves the on-screen video rect: prefer the live AVPlayerLayer rect when
+/// its aspect matches the video; the layer lookup can fail (or report before
+/// the item is ready) and return full bounds, which breaks cursor mapping —
+/// then the aspect-fit fallback is the better rect.
+private func resolvedPlayerVideoRect(playerVideoRect: CGRect, container: CGSize, render: CGSize) -> CGRect {
+    let fitted = AVMakeRect(
+        aspectRatio: render,
+        insideRect: CGRect(origin: .zero, size: container)
+    )
+    guard render.width > 0, render.height > 0 else { return fitted }
+    guard playerVideoRect.width > 2, playerVideoRect.height > 2 else { return fitted }
+    let reported = CGRect(
+        x: playerVideoRect.minX,
+        y: container.height - playerVideoRect.maxY,
+        width: playerVideoRect.width,
+        height: playerVideoRect.height
+    )
+    let reportedAspect = reported.width / max(1, reported.height)
+    let videoAspect = render.width / max(1, render.height)
+    guard abs(reportedAspect - videoAspect) / videoAspect < 0.02 else { return fitted }
+    return reported
+}
+
 /// Draws the custom cursor on top of the player, aligned to the real video rect.
 private struct CursorPlayerOverlay: View {
     @ObservedObject var model: EditorModel
@@ -958,28 +1075,11 @@ private struct CursorPlayerOverlay: View {
         GeometryReader { geometry in
             let container = geometry.size
             let render = model.videoRenderSize
-            // Prefer the live AVPlayerLayer rect — but only when its aspect
-            // matches the video. The layer lookup can fail (or report before
-            // the item is ready) and return full bounds, which breaks the
-            // cursor mapping; then the aspect-fit fallback is the better rect.
-            let videoRect: CGRect = {
-                let fitted = letterboxedRect(aspect: render, in: container)
-                guard playerVideoRect.width > 2, playerVideoRect.height > 2 else {
-                    return fitted
-                }
-                let reported = CGRect(
-                    x: playerVideoRect.minX,
-                    y: container.height - playerVideoRect.maxY,
-                    width: playerVideoRect.width,
-                    height: playerVideoRect.height
-                )
-                let reportedAspect = reported.width / max(1, reported.height)
-                let videoAspect = render.width / max(1, render.height)
-                guard abs(reportedAspect - videoAspect) / videoAspect < 0.02 else {
-                    return fitted
-                }
-                return reported
-            }()
+            let videoRect = resolvedPlayerVideoRect(
+                playerVideoRect: playerVideoRect,
+                container: container,
+                render: render
+            )
 
             if let state = model.cursorPreview(at: model.playhead) {
                 // Match export: the cursor scales with the video content, so it
@@ -1038,15 +1138,177 @@ private struct CursorPlayerOverlay: View {
             y: min(1, max(0, normalized.y)) * videoRect.height
         )
     }
+}
 
-    private func letterboxedRect(aspect: CGSize, in container: CGSize) -> CGRect {
-        guard aspect.width > 0, aspect.height > 0, container.width > 0, container.height > 0 else {
-            return CGRect(origin: .zero, size: container)
+/// Interactive crop-rect editor shown over the full-frame preview while the
+/// Crop tab is open. Drag inside the rect to move it, drag a corner handle to
+/// resize, or drag on the dimmed area to draw a new region. Commits on release.
+private struct CropEditingOverlay: View {
+    @ObservedObject var model: EditorModel
+    var playerVideoRect: CGRect
+
+    @State private var draft: CGRect?
+    @State private var dragMode: DragMode?
+
+    private enum DragMode {
+        case move(startRect: CGRect)
+        case resize(Corner, startRect: CGRect)
+        case draw(start: CGPoint)
+    }
+
+    private enum Corner: CaseIterable {
+        case topLeft, topRight, bottomLeft, bottomRight
+
+        func point(in rect: CGRect) -> CGPoint {
+            switch self {
+            case .topLeft: CGPoint(x: rect.minX, y: rect.minY)
+            case .topRight: CGPoint(x: rect.maxX, y: rect.minY)
+            case .bottomLeft: CGPoint(x: rect.minX, y: rect.maxY)
+            case .bottomRight: CGPoint(x: rect.maxX, y: rect.maxY)
+            }
         }
-        return AVMakeRect(
-            aspectRatio: aspect,
-            insideRect: CGRect(origin: .zero, size: container)
+
+        var opposite: Corner {
+            switch self {
+            case .topLeft: .bottomRight
+            case .topRight: .bottomLeft
+            case .bottomLeft: .topRight
+            case .bottomRight: .topLeft
+            }
+        }
+    }
+
+    private let handleRadius: CGFloat = 5
+    private let handleHitSlop: CGFloat = 14
+
+    var body: some View {
+        GeometryReader { geometry in
+            let container = geometry.size
+            let videoRect = resolvedPlayerVideoRect(
+                playerVideoRect: playerVideoRect,
+                container: container,
+                render: model.videoRenderSize
+            )
+            let rect = draft ?? model.cropRect ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+            let view = viewRect(for: rect, in: videoRect)
+
+            Canvas { context, _ in
+                var dim = Path(CGRect(origin: .zero, size: container))
+                dim.addPath(Path(view))
+                context.fill(dim, with: .color(.black.opacity(0.45)), style: FillStyle(eoFill: true))
+                context.stroke(Path(view), with: .color(.white.opacity(0.9)), lineWidth: 1.5)
+                for corner in Corner.allCases {
+                    let center = corner.point(in: view)
+                    let circle = Path(ellipseIn: CGRect(
+                        x: center.x - handleRadius,
+                        y: center.y - handleRadius,
+                        width: handleRadius * 2,
+                        height: handleRadius * 2
+                    ))
+                    context.fill(circle, with: .color(.white))
+                    context.stroke(circle, with: .color(.black.opacity(0.4)), lineWidth: 0.5)
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(cropGesture(videoRect: videoRect, rect: rect, view: view))
+        }
+    }
+
+    private func viewRect(for normalized: CGRect, in videoRect: CGRect) -> CGRect {
+        CGRect(
+            x: videoRect.minX + normalized.minX * videoRect.width,
+            y: videoRect.minY + normalized.minY * videoRect.height,
+            width: normalized.width * videoRect.width,
+            height: normalized.height * videoRect.height
         )
+    }
+
+    private func normalizedPoint(_ point: CGPoint, in videoRect: CGRect) -> CGPoint {
+        CGPoint(
+            x: (point.x - videoRect.minX) / videoRect.width,
+            y: (point.y - videoRect.minY) / videoRect.height
+        )
+    }
+
+    private func cropGesture(videoRect: CGRect, rect: CGRect, view: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                if dragMode == nil {
+                    dragMode = mode(for: value.startLocation, rect: rect, view: view)
+                }
+                guard let dragMode else { return }
+                draft = updatedRect(
+                    mode: dragMode,
+                    translation: value.translation,
+                    location: value.location,
+                    videoRect: videoRect
+                )
+            }
+            .onEnded { _ in
+                if let draft {
+                    model.setCropRect(draft)
+                }
+                draft = nil
+                dragMode = nil
+            }
+    }
+
+    private func mode(for start: CGPoint, rect: CGRect, view: CGRect) -> DragMode {
+        for corner in Corner.allCases {
+            let point = corner.point(in: view)
+            if hypot(start.x - point.x, start.y - point.y) <= handleHitSlop {
+                return .resize(corner, startRect: rect)
+            }
+        }
+        if view.contains(start) {
+            return .move(startRect: rect)
+        }
+        return .draw(start: normalizedPoint(start, in: view))
+    }
+
+    private func updatedRect(
+        mode: DragMode,
+        translation: CGSize,
+        location: CGPoint,
+        videoRect: CGRect
+    ) -> CGRect {
+        switch mode {
+        case let .move(startRect):
+            let dx = translation.width / videoRect.width
+            let dy = translation.height / videoRect.height
+            return CropGeometry.clamped(startRect.offsetBy(dx: dx, dy: dy))
+
+        case let .resize(corner, startRect):
+            let fixed = corner.opposite.point(in: startRect)
+            let current = normalizedPoint(location, in: videoRect)
+            var width = max(CropGeometry.minimumFraction, abs(current.x - fixed.x))
+            var height = max(CropGeometry.minimumFraction, abs(current.y - fixed.y))
+            if let aspect = model.cropAspectLock {
+                if width / height > aspect {
+                    width = height * aspect
+                } else {
+                    height = width / aspect
+                }
+            }
+            let originX = current.x >= fixed.x ? fixed.x : fixed.x - width
+            let originY = current.y >= fixed.y ? fixed.y : fixed.y - height
+            return CropGeometry.clamped(CGRect(x: originX, y: originY, width: width, height: height))
+
+        case let .draw(start):
+            let current = normalizedPoint(location, in: videoRect)
+            var width = abs(current.x - start.x)
+            var height = abs(current.y - start.y)
+            if let aspect = model.cropAspectLock {
+                if width / max(0.0001, height) > aspect {
+                    width = height * aspect
+                } else {
+                    height = width / aspect
+                }
+            }
+            let originX = current.x >= start.x ? start.x : start.x - width
+            let originY = current.y >= start.y ? start.y : start.y - height
+            return CropGeometry.clamped(CGRect(x: originX, y: originY, width: width, height: height))
+        }
     }
 }
 
@@ -1102,6 +1364,8 @@ private struct ClipInspector: View {
                     switch model.inspectorTab {
                     case .edit:
                         editTab
+                    case .crop:
+                        CropInspectorPanel(model: model)
                     case .cursor:
                         CursorInspectorPanel(model: model)
                     case .camera:
@@ -1324,12 +1588,23 @@ private struct ClipInspector: View {
         }
 
         if range.focusMode == .fixedPoint {
+            // The mini map shows the rendered (possibly cropped) frame, so
+            // points are remapped into crop space for display and back to
+            // full-frame space on change.
             FixedFocusMap(
                 videoSize: model.videoRenderSize,
                 amount: range.amount,
-                point: range.fixedFocusPoint,
-                cursorPoint: model.cursorPositionAtPlayhead,
-                onChange: { model.setZoomFixedFocusPoint($0, for: range.id) }
+                point: model.cropRect.map { CropGeometry.remap(range.fixedFocusPoint, to: $0) } ?? range.fixedFocusPoint,
+                cursorPoint: model.cropRect.map { CropGeometry.remap(model.cursorPositionAtPlayhead, to: $0) } ?? model.cursorPositionAtPlayhead,
+                onChange: { point in
+                    let fullFrame = model.cropRect.map { crop in
+                        CGPoint(
+                            x: crop.minX + point.x * crop.width,
+                            y: crop.minY + point.y * crop.height
+                        )
+                    } ?? point
+                    model.setZoomFixedFocusPoint(fullFrame, for: range.id)
+                }
             )
             .padding(.top, 2)
 
@@ -2018,6 +2293,73 @@ private struct ZoomRangeBlock: View {
 }
 
 // MARK: - Cursor inspector
+
+private struct CropInspectorPanel: View {
+    @ObservedObject var model: EditorModel
+
+    private let aspects: [(title: String, value: CGFloat?)] = [
+        ("Free", nil),
+        ("16:9", 16.0 / 9.0),
+        ("9:16", 9.0 / 16.0),
+        ("1:1", 1.0),
+        ("4:3", 4.0 / 3.0)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("CROP")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.75)
+                        .foregroundStyle(.secondary)
+                    Text("Frame crop")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                Spacer()
+                Button("Reset") {
+                    model.resetCrop()
+                }
+                .controlSize(.small)
+                .disabled(model.cropRect == nil)
+                .help("Back to the full frame")
+            }
+
+            Text("Drag on the preview to choose the visible region. Everything outside the frame is removed from the export.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("ASPECT")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.75)
+                    .foregroundStyle(.secondary)
+                Picker("Aspect", selection: Binding(
+                    get: { model.cropAspectLock },
+                    set: model.setCropAspect
+                )) {
+                    ForEach(aspects, id: \.title) { aspect in
+                        Text(aspect.title).tag(aspect.value)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+
+            if let rect = model.cropRect {
+                LabeledContent("Visible area") {
+                    Text("\(Int((rect.width * 100).rounded()))% × \(Int((rect.height * 100).rounded()))%")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+            }
+        }
+        .onAppear { model.setCropEditing(true) }
+        .onDisappear { model.setCropEditing(false) }
+    }
+}
 
 private struct CursorInspectorPanel: View {
     @ObservedObject var model: EditorModel

@@ -195,6 +195,7 @@ struct TimelineClipLayout: Identifiable {
 
 enum InspectorTab: String, CaseIterable, Identifiable {
     case edit
+    case crop
     case cursor
     case camera
     case background
@@ -205,6 +206,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .edit: "Edit"
+        case .crop: "Crop"
         case .cursor: "Cursor"
         case .camera: "Camera"
         case .background: "Background"
@@ -215,6 +217,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .edit: "scissors"
+        case .crop: "crop"
         case .cursor: "cursorarrow.motionlines"
         case .camera: "camera.fill"
         case .background: "photo.fill"
@@ -257,6 +260,7 @@ private struct EditSnapshot: Equatable {
     var isBackgroundEnabled: Bool
     var backgroundCornerRadius: Double
     var backgroundPadding: Double
+    var cropRect: CGRect?
     var musicURL: URL?
     var musicVolume: Double
     var isOriginalAudioMuted: Bool
@@ -273,6 +277,7 @@ private struct EditSnapshot: Equatable {
             && isBackgroundEnabled == other.isBackgroundEnabled
             && abs(backgroundCornerRadius - other.backgroundCornerRadius) < 0.000_1
             && abs(backgroundPadding - other.backgroundPadding) < 0.000_1
+            && cropRect == other.cropRect
             && musicURL == other.musicURL
             && abs(musicVolume - other.musicVolume) < 0.000_1
             && isOriginalAudioMuted == other.isOriginalAudioMuted
@@ -329,6 +334,16 @@ final class EditorModel: ObservableObject {
     /// Fraction of the frame width/height left as background margin on each
     /// edge when a wallpaper is active (0.025 = video scaled to 95%).
     @Published var backgroundPadding: Double = 0.025
+    /// Project-wide spatial crop of the recorded frame, normalized (0...1,
+    /// top-left origin) over the oriented source video. nil = full frame.
+    @Published var cropRect: CGRect?
+    /// True while the Crop inspector tab is open — the preview then shows the
+    /// full uncropped frame so the crop rect can be dragged over all content.
+    /// Exports always apply the crop regardless of this flag.
+    @Published private(set) var isCropEditing = false
+    /// Aspect lock (width/height) chosen in the Crop tab; nil = freeform.
+    /// Session-only, not persisted.
+    @Published var cropAspectLock: CGFloat?
     /// Local music file mixed under the video (nil = none).
     @Published private(set) var musicURL: URL?
     @Published private(set) var musicError: String?
@@ -375,6 +390,10 @@ final class EditorModel: ObservableObject {
     /// sample these so tip and content stay locked when zoomed.
     private var zoomTransformSamples: [ZoomTransformSample] = []
     private var compositionBaseTransform: CGAffineTransform = .identity
+    /// Full oriented source size in pixels (preview build only). The cursor
+    /// track is normalized against the uncropped frame, so cursor math needs
+    /// this even when a crop shrinks `videoRenderSize`.
+    private var sourceContentSize: CGSize?
     @Published var isPlaying = false
 
     private var sourceAsset: AVURLAsset?
@@ -575,6 +594,7 @@ final class EditorModel: ObservableObject {
             isBackgroundEnabled: isBackgroundEnabled,
             backgroundCornerRadius: backgroundCornerRadius,
             backgroundPadding: backgroundPadding,
+            cropRect: cropRect,
             musicURL: musicURL,
             musicVolume: musicVolume,
             isOriginalAudioMuted: isOriginalAudioMuted,
@@ -597,6 +617,7 @@ final class EditorModel: ObservableObject {
         isBackgroundEnabled = snapshot.isBackgroundEnabled
         backgroundCornerRadius = snapshot.backgroundCornerRadius
         backgroundPadding = snapshot.backgroundPadding
+        cropRect = snapshot.cropRect
         musicVolume = snapshot.musicVolume
         isOriginalAudioMuted = snapshot.isOriginalAudioMuted
         isDirty = snapshot.isDirty
@@ -1098,6 +1119,48 @@ final class EditorModel: ObservableObject {
         rebuildPreview(preservingPlayhead: true)
     }
 
+    /// Sets the project-wide frame crop (normalized 0...1, top-left origin).
+    /// Pass nil to return to the full frame. While the Crop tab is open the
+    /// preview shows the full frame anyway, so no rebuild is needed there.
+    func setCropRect(_ rect: CGRect?) {
+        let clamped = rect.map { CropGeometry.clamped($0) }
+        guard cropRect != clamped else { return }
+        cropRect = clamped
+        markDirty()
+        if !isCropEditing {
+            rebuildPreview(preservingPlayhead: true)
+        }
+    }
+
+    /// Enters/leaves crop editing. While editing, the preview renders the full
+    /// uncropped frame so the overlay can drag the rect over all content.
+    func setCropEditing(_ editing: Bool) {
+        guard isCropEditing != editing else { return }
+        isCropEditing = editing
+        rebuildPreview(preservingPlayhead: true)
+    }
+
+    /// Locks the crop to a width/height aspect (nil = freeform), reshaping the
+    /// current rect around its center. Passes through `setCropRect` semantics.
+    func setCropAspect(_ aspect: CGFloat?) {
+        cropAspectLock = aspect
+        guard let aspect, aspect > 0 else { return }
+        let current = cropRect ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        setCropRect(CropGeometry.rect(aspect: aspect, centeredOn: current))
+    }
+
+    /// Back to the full frame; also drops any aspect lock.
+    func resetCrop() {
+        cropAspectLock = nil
+        setCropRect(nil)
+    }
+
+    /// Crop applied to the current preview build — nil while crop editing
+    /// shows the full frame.
+    private var previewCropRect: CGRect? {
+        isCropEditing ? nil : cropRect
+    }
+
     // MARK: - Music
 
     /// Lets the user pick a local audio file to mix under the video.
@@ -1295,6 +1358,11 @@ final class EditorModel: ObservableObject {
 
         let trailTimes = MotionBlurMath.trailTimes(at: time, settings: motionBlurSettings)
         let trail: [CursorTrailSample] = trailTimes.compactMap { sample in
+            // The cursor is cropped away entirely while outside the crop rect.
+            if let crop = previewCropRect,
+               !CropGeometry.contains(preciseCursorPosition(at: sample.time), in: crop) {
+                return nil
+            }
             let point = displayCursorPoint(at: sample.time, renderSize: renderSize)
             return CursorTrailSample(
                 normalizedPosition: CGPoint(
@@ -1484,6 +1552,7 @@ final class EditorModel: ObservableObject {
                 isBackgroundEnabled: isBackgroundEnabled,
                 backgroundCornerRadius: backgroundCornerRadius,
                 backgroundPadding: backgroundPadding,
+                cropRect: cropRect,
                 wallpaper: wallpaperRef,
                 musicRelativePath: nil,
                 musicVolume: musicVolume,
@@ -1603,6 +1672,7 @@ final class EditorModel: ObservableObject {
         isBackgroundEnabled = document.isBackgroundEnabled
         backgroundCornerRadius = document.backgroundCornerRadius
         backgroundPadding = document.backgroundPadding
+        cropRect = document.cropRect
         musicVolume = document.musicVolume
         isOriginalAudioMuted = document.isOriginalAudioMuted
 
@@ -1961,7 +2031,7 @@ final class EditorModel: ObservableObject {
 
     private func rebuildPreview(preservingPlayhead: Bool) {
         // Core Animation cursor tool is export-only — never attach it to AVPlayerItem.
-        guard let build = makeComposition(includeCursorOverlay: false) else { return }
+        guard let build = makeComposition(includeCursorOverlay: false, ignoreCrop: isCropEditing) else { return }
         let previousPlayhead = preservingPlayhead ? min(playhead, build.duration) : 0
 
         let item = AVPlayerItem(asset: build.composition)
@@ -2003,14 +2073,16 @@ final class EditorModel: ObservableObject {
             cameraTrack: previewCompositionCameraTrack,
             sourceTrack: sourceVideoTrack,
             duration: previewCompositionDuration,
-            includeCursorOverlay: false
+            includeCursorOverlay: false,
+            ignoreCrop: isCropEditing
         )
     }
 
     private func makeComposition(
         includeCursorOverlay: Bool,
         renderScale: CGFloat = 1,
-        frameRate: Int32 = 60
+        frameRate: Int32 = 60,
+        ignoreCrop: Bool = false
     ) -> (
         composition: AVMutableComposition,
         videoComposition: AVMutableVideoComposition,
@@ -2124,7 +2196,8 @@ final class EditorModel: ObservableObject {
             duration: cursor,
             includeCursorOverlay: includeCursorOverlay,
             renderScale: renderScale,
-            frameRate: frameRate
+            frameRate: frameRate,
+            ignoreCrop: ignoreCrop
         )
         return (
             composition,
@@ -2143,23 +2216,41 @@ final class EditorModel: ObservableObject {
         duration: CMTime,
         includeCursorOverlay: Bool,
         renderScale: CGFloat = 1,
-        frameRate: Int32 = 60
+        frameRate: Int32 = 60,
+        ignoreCrop: Bool = false
     ) -> AVMutableVideoComposition {
         let naturalSize = sourceTrack.naturalSize
         let preferred = sourceTrack.preferredTransform
         let transformedSize = naturalSize.applying(preferred)
+        let orientedSize = CGSize(width: abs(transformedSize.width), height: abs(transformedSize.height))
+        // Project-wide crop: content becomes the cropped region of the source
+        // frame. The crop shift (in source pixels, after `preferred`) moves the
+        // crop origin to the canvas origin; every downstream stage (wallpaper
+        // placement, zoom keyframes, camera, cursor) builds on renderSize and
+        // needs no crop-specific handling.
+        let cropShift: CGAffineTransform
+        let contentSize: CGSize
+        if let activeCrop = ignoreCrop ? nil : cropRect {
+            let cropPixels = CropGeometry.pixelRect(for: activeCrop, in: orientedSize)
+            cropShift = CGAffineTransform(translationX: -cropPixels.minX, y: -cropPixels.minY)
+            contentSize = cropPixels.size
+        } else {
+            cropShift = .identity
+            contentSize = orientedSize
+        }
         // Even integer pixel size — fractional/odd render sizes can trip the
         // VRP and most video codecs. All downstream geometry (wallpaper,
         // camera, zoom keyframes, cursor) derives from renderSize, so a
         // reduced scale downscales the whole export proportionally.
         let renderSize = CGSize(
-            width: max(2, (abs(transformedSize.width) * renderScale / 2).rounded(.down) * 2),
-            height: max(2, (abs(transformedSize.height) * renderScale / 2).rounded(.down) * 2)
+            width: max(2, (contentSize.width * renderScale / 2).rounded(.down) * 2),
+            height: max(2, (contentSize.height * renderScale / 2).rounded(.down) * 2)
         )
         // The preview cursor overlay tracks videoRenderSize — only update it
         // for the full-scale (preview) build, not reduced-size exports.
         if renderScale == 1 {
             videoRenderSize = renderSize
+            sourceContentSize = orientedSize
         }
 
 
@@ -2186,15 +2277,13 @@ final class EditorModel: ObservableObject {
         let baseTransform: CGAffineTransform
         if includeWallpaper {
             let placementScale = CGFloat(1 - 2 * backgroundPadding) * renderScale
-            let orientedWidth = abs(transformedSize.width)
-            let orientedHeight = abs(transformedSize.height)
-            let offsetX = (renderSize.width - orientedWidth * placementScale) / 2
-            let offsetY = (renderSize.height - orientedHeight * placementScale) / 2
+            let offsetX = (renderSize.width - contentSize.width * placementScale) / 2
+            let offsetY = (renderSize.height - contentSize.height * placementScale) / 2
             let placement = CGAffineTransform(scaleX: placementScale, y: placementScale)
                 .translatedBy(x: offsetX / placementScale, y: offsetY / placementScale)
-            baseTransform = preferred.concatenating(placement)
+            baseTransform = preferred.concatenating(cropShift).concatenating(placement)
         } else {
-            baseTransform = preferred.concatenating(
+            baseTransform = preferred.concatenating(cropShift).concatenating(
                 CGAffineTransform(scaleX: renderScale, y: renderScale)
             )
         }
@@ -2258,7 +2347,7 @@ final class EditorModel: ObservableObject {
                 backgroundImageURL: selectedWallpaperURL,
                 applyRoundedCorners: applyRoundedCorners,
                 cornerRadius: CGFloat(backgroundCornerRadius),
-                cursor: includeCursor ? makeCursorRenderData(renderSize: renderSize) : nil
+                cursor: includeCursor ? makeCursorRenderData(renderSize: renderSize, sourceFrameSize: orientedSize) : nil
             )
             videoComposition.instructions = [instruction]
             videoComposition.customVideoCompositorClass = ViewioVideoCompositor.self
@@ -2327,9 +2416,9 @@ final class EditorModel: ObservableObject {
                     transition: transition,
                     compositionDuration: duration
                 )
-                let cursorFocus = zoomFocus(at: time, in: range)
+                let cursorFocus = remapToCropSpace(zoomFocus(at: time, in: range))
                 // The sample's focus is the zoom pivot (zoom-blur epicenter).
-                focus = range.focusMode == .fixedPoint ? range.fixedFocusPoint : cursorFocus
+                focus = range.focusMode == .fixedPoint ? remapToCropSpace(range.fixedFocusPoint) : cursorFocus
                 zoom = zoomTransform(
                     renderSize: renderSize,
                     scale: scale,
@@ -2452,13 +2541,15 @@ final class EditorModel: ObservableObject {
     }
 
     /// Plain-data cursor description for the compositor's export render.
-    private func makeCursorRenderData(renderSize: CGSize) -> CursorRenderData? {
+    private func makeCursorRenderData(renderSize: CGSize, sourceFrameSize: CGSize) -> CursorRenderData? {
         guard cursorSettings.isEnabled, hasCursorData, !preciseCursorTrack.isEmpty,
               let image = CursorArtwork.cgImage(style: cursorSettings.style) else { return nil }
         return CursorRenderData(
             image: image,
             hotspot: CursorArtwork.hotspot(for: cursorSettings.style),
             size: 16 * CGFloat(cursorSettings.size) * cursorPointPixelScale(renderSize: renderSize),
+            sourceFrameSize: sourceFrameSize,
+            cropRect: cropRect,
             track: preciseCursorTrack,
             clickTimes: clickEvents.map(\.time),
             clickEffect: cursorSettings.clickEffect,
@@ -2475,10 +2566,14 @@ final class EditorModel: ObservableObject {
         renderSize: CGSize
     ) -> CGPoint {
         // Always use the precise track so the tip matches the recording position.
+        // The track is normalized over the full (uncropped) source frame, so
+        // map through the full source size — the composition transform then
+        // applies the crop shift itself.
         let normalized = preciseCursorPosition(at: time)
+        let sourceSize = sourceContentSize ?? renderSize
         let sourcePoint = CGPoint(
-            x: normalized.x * renderSize.width,
-            y: normalized.y * renderSize.height
+            x: normalized.x * sourceSize.width,
+            y: normalized.y * sourceSize.height
         )
 
         // CRITICAL: use the same interpolated transform as the video composition.
@@ -2539,8 +2634,9 @@ final class EditorModel: ObservableObject {
             target = range.focusAnchor.targetPoint(in: renderSize, padding: range.focusPadding)
         case .fixedPoint:
             // Cursor is ignored; the viewport centers on the fixed point.
-            let fx = min(1, max(0, Double(range.fixedFocusPoint.x.isFinite ? range.fixedFocusPoint.x : 0.5)))
-            let fy = min(1, max(0, Double(range.fixedFocusPoint.y.isFinite ? range.fixedFocusPoint.y : 0.5)))
+            let fixed = remapToCropSpace(range.fixedFocusPoint)
+            let fx = min(1, max(0, Double(fixed.x.isFinite ? fixed.x : 0.5)))
+            let fy = min(1, max(0, Double(fixed.y.isFinite ? fixed.y : 0.5)))
             anchor = CGPoint(x: fx * renderSize.width, y: fy * renderSize.height)
             target = CGPoint(x: renderSize.width / 2, y: renderSize.height / 2)
         }
@@ -2569,6 +2665,13 @@ final class EditorModel: ObservableObject {
             ? CursorMotion.process(track: cursorTrack, motion: .precise)
             : preciseCursorTrack
         return CursorMotion.position(at: time, in: track, motion: .precise)
+    }
+
+    /// Converts a normalized full-frame point into crop space (identity when
+    /// uncropped). Zoom focus math works in render space, which is the cropped
+    /// frame once a crop is set.
+    private func remapToCropSpace(_ point: CGPoint) -> CGPoint {
+        cropRect.map { CropGeometry.remap(point, to: $0) } ?? point
     }
 
     /// Cursor position used for zoom framing (precise; kept as a named alias).

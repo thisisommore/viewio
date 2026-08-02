@@ -21,6 +21,12 @@ struct CursorRenderData {
     let hotspot: CGPoint
     /// Cursor size in render pixels (matches the real cursor's on-screen size).
     let size: CGFloat
+    /// Full oriented source frame size in pixels — the track is normalized
+    /// against the uncropped frame, and the frame transform applies the crop.
+    let sourceFrameSize: CGSize
+    /// Project-wide crop (normalized, full-frame space). The cursor is hidden
+    /// while the tracked point falls outside it.
+    let cropRect: CGRect?
     /// Normalized track (0...1, top-left origin), precise — no smoothing.
     let track: [CursorPosition]
     let clickTimes: [Double]
@@ -409,7 +415,7 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
                 let ghostTime = max(0, time - data.trailLookback * fraction)
                 let opacity = data.trailStrength * 0.55 * (1 - fraction)
                     * CursorTypingHider.opacity(at: ghostTime, in: data.hiddenSegments)
-                guard opacity > 0.02 else { continue }
+                guard opacity > 0.02, cursorInsideCrop(at: ghostTime, data: data) else { continue }
                 let point = cursorFramePoint(at: ghostTime, data: data, instruction: instruction, renderSize: renderSize)
                 let ghost = cursor.applyingFilter("CIColorMatrix", parameters: [
                     "inputAVector": CIVector(x: 0, y: 0, z: 0, w: CGFloat(opacity))
@@ -420,7 +426,7 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
         }
 
         // Live head — the hotspot lands exactly on the tracked point.
-        if visibility > 0.01 {
+        if visibility > 0.01, cursorInsideCrop(at: time, data: data) {
             let headPoint = cursorFramePoint(at: time, data: data, instruction: instruction, renderSize: renderSize)
             let headScale = data.clickEffect.shrinkScale(at: time, clickTimes: data.clickTimes)
             let head = visibility < 0.99
@@ -462,12 +468,18 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
     ) -> CGPoint {
         let normalized = interpolateCursorTrack(data.track, at: time)
         let sourcePoint = CGPoint(
-            x: normalized.x * renderSize.width,
-            y: normalized.y * renderSize.height
+            x: normalized.x * data.sourceFrameSize.width,
+            y: normalized.y * data.sourceFrameSize.height
         )
         let framePoint = sourcePoint.applying(instruction.sample(at: time).transform)
         // AVFoundation transforms are top-left origin; Core Image is bottom-left.
         return CGPoint(x: framePoint.x, y: renderSize.height - framePoint.y)
+    }
+
+    /// False when a crop is set and the tracked point at `time` falls outside it.
+    private func cursorInsideCrop(at time: Double, data: CursorRenderData) -> Bool {
+        guard let crop = data.cropRect else { return true }
+        return CropGeometry.contains(interpolateCursorTrack(data.track, at: time), in: crop)
     }
 
     private func interpolateCursorTrack(_ track: [CursorPosition], at time: Double) -> CGPoint {
@@ -499,6 +511,7 @@ final class ViewioVideoCompositor: NSObject, AVVideoCompositing {
         for clickTime in data.clickTimes {
             let progress = (time - clickTime) / effectDuration
             guard progress >= 0, progress <= 1,
+                  cursorInsideCrop(at: clickTime, data: data),
                   let ring = clickRingImage(for: data.clickEffect) else { continue }
 
             let center = cursorFramePoint(at: clickTime, data: data, instruction: instruction, renderSize: renderSize)

@@ -184,6 +184,64 @@ final class viewioTests: XCTestCase {
         XCTAssertEqual(scaled.end, oldSecondStart + oldRelEnd / 2, accuracy: 0.05)
     }
 
+    func testCropAppliesToPreviewAndExportSize() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let sourceURL = directory.appendingPathComponent("source.mp4")
+        let exportURL = directory.appendingPathComponent("cropped.mp4")
+        try await makeTestVideo(at: sourceURL) // 320 × 180
+
+        let model = EditorModel(sourceURL: sourceURL)
+        try await waitUntil {
+            if case .ready = model.loadState {
+                true
+            } else {
+                false
+            }
+        }
+        XCTAssertEqual(model.videoRenderSize, CGSize(width: 320, height: 180))
+
+        // Center half-frame crop → 160 × 90 render size.
+        model.setCropRect(CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5))
+        XCTAssertEqual(model.videoRenderSize, CGSize(width: 160, height: 90))
+
+        // Crop editing shows the full frame again so the rect can be adjusted.
+        model.setCropEditing(true)
+        XCTAssertEqual(model.videoRenderSize, CGSize(width: 320, height: 180))
+        model.setCropEditing(false)
+        XCTAssertEqual(model.videoRenderSize, CGSize(width: 160, height: 90))
+
+        model.export(to: exportURL)
+        try await waitUntil(timeout: 20) {
+            switch model.exportState {
+            case .completed, .failed:
+                true
+            case .idle, .exporting:
+                false
+            }
+        }
+
+        if case let .failed(message) = model.exportState {
+            XCTFail("Export failed: \(message)")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: exportURL.path))
+
+        let exported = AVURLAsset(url: exportURL)
+        let track = try await exported.loadTracks(withMediaType: .video).first
+        let naturalSize = try await track?.load(.naturalSize) ?? .zero
+        XCTAssertEqual(abs(naturalSize.width), 160, accuracy: 2)
+        XCTAssertEqual(abs(naturalSize.height), 90, accuracy: 2)
+
+        // Undo restores the full frame.
+        model.undo()
+        XCTAssertNil(model.cropRect)
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 8,
         condition: @escaping @MainActor () -> Bool
@@ -293,6 +351,106 @@ final class viewioTests: XCTestCase {
 private enum TestError: Error {
     case timedOut
     case couldNotCreateFixture
+}
+
+final class CropGeometryTests: XCTestCase {
+    func testClampedKeepsRectInsideUnitSquare() {
+        let rect = CropGeometry.clamped(CGRect(x: -0.2, y: 0.8, width: 0.5, height: 0.5))
+        XCTAssertGreaterThanOrEqual(rect.minX, 0)
+        XCTAssertGreaterThanOrEqual(rect.minY, 0)
+        XCTAssertLessThanOrEqual(rect.maxX, 1)
+        XCTAssertLessThanOrEqual(rect.maxY, 1)
+    }
+
+    func testClampedEnforcesMinimumSize() {
+        let rect = CropGeometry.clamped(CGRect(x: 0.99, y: 0.99, width: 0.001, height: 0.001))
+        XCTAssertEqual(rect.width, CropGeometry.minimumFraction, accuracy: 0.0001)
+        XCTAssertEqual(rect.height, CropGeometry.minimumFraction, accuracy: 0.0001)
+        XCTAssertLessThanOrEqual(rect.maxX, 1)
+        XCTAssertLessThanOrEqual(rect.maxY, 1)
+    }
+
+    func testPixelRectProducesEvenSizes() {
+        // 0.5 of 333 = 166.5 → even-rounded to 166.
+        let pixels = CropGeometry.pixelRect(
+            for: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5),
+            in: CGSize(width: 333, height: 181)
+        )
+        XCTAssertEqual(pixels.width.truncatingRemainder(dividingBy: 2), 0)
+        XCTAssertEqual(pixels.height.truncatingRemainder(dividingBy: 2), 0)
+        XCTAssertEqual(pixels.minX, 83.25, accuracy: 0.001)
+        XCTAssertEqual(pixels.minY, 45.25, accuracy: 0.001)
+    }
+
+    func testRemapToCropSpace() {
+        let crop = CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+        let remapped = CropGeometry.remap(CGPoint(x: 0.5, y: 0.75), to: crop)
+        XCTAssertEqual(remapped.x, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(remapped.y, 1.0, accuracy: 0.0001)
+        // Outside the crop maps outside 0...1.
+        let outside = CropGeometry.remap(CGPoint(x: 0.1, y: 0.5), to: crop)
+        XCTAssertLessThan(outside.x, 0)
+    }
+
+    func testContainsInCrop() {
+        let crop = CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+        XCTAssertTrue(CropGeometry.contains(CGPoint(x: 0.5, y: 0.5), in: crop))
+        XCTAssertTrue(CropGeometry.contains(CGPoint(x: 0.25, y: 0.75), in: crop))
+        XCTAssertFalse(CropGeometry.contains(CGPoint(x: 0.1, y: 0.5), in: crop))
+        XCTAssertFalse(CropGeometry.contains(CGPoint(x: 0.5, y: 0.9), in: crop))
+    }
+
+    func testAspectRectCentersAndFits() {
+        let rect = CropGeometry.rect(
+            aspect: 16.0 / 9.0,
+            centeredOn: CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
+        )
+        XCTAssertEqual(rect.width / rect.height, 16.0 / 9.0, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(rect.maxX, 1)
+        XCTAssertLessThanOrEqual(rect.maxY, 1)
+        XCTAssertEqual(rect.midX, 0.5, accuracy: 0.001)
+        XCTAssertEqual(rect.midY, 0.5, accuracy: 0.001)
+    }
+}
+
+final class CropProjectPersistenceTests: XCTestCase {
+    private func makeDocument(cropRect: CGRect?) -> ViewioProjectDocument {
+        ViewioProjectDocument(
+            version: ViewioProjectDocument.currentVersion,
+            captureMode: .display,
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1, speed: 1)],
+            zoomRanges: [],
+            cursorSettings: .default,
+            motionBlurSettings: .default,
+            cameraSettings: .default,
+            isBackgroundEnabled: false,
+            backgroundCornerRadius: 28,
+            backgroundPadding: 0.025,
+            cropRect: cropRect,
+            wallpaper: nil,
+            musicRelativePath: nil,
+            musicVolume: 0.5,
+            isOriginalAudioMuted: false
+        )
+    }
+
+    func testDocumentRoundTripsWithCropRect() throws {
+        let crop = CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.6)
+        let data = try JSONEncoder().encode(makeDocument(cropRect: crop))
+        let decoded = try JSONDecoder().decode(ViewioProjectDocument.self, from: data)
+        XCTAssertEqual(decoded.cropRect, crop)
+    }
+
+    /// Projects saved before the crop feature have no cropRect key — they
+    /// must still decode, defaulting to the full frame.
+    func testDocumentWithoutCropRectDecodesAsNil() throws {
+        let data = try JSONEncoder().encode(makeDocument(cropRect: CGRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5)))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "cropRect")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(ViewioProjectDocument.self, from: legacyData)
+        XCTAssertNil(decoded.cropRect)
+    }
 }
 
 final class CursorTypingHiderTests: XCTestCase {

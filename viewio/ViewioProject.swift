@@ -69,6 +69,9 @@ struct ViewioProjectDocument: Codable, Equatable {
     var isBackgroundEnabled: Bool
     var backgroundCornerRadius: Double
     var backgroundPadding: Double
+    /// Project-wide frame crop, normalized 0...1 over the oriented source
+    /// video (nil = full frame). Optional so older projects decode fine.
+    var cropRect: CGRect?
     var wallpaper: ProjectWallpaperRef?
     var musicRelativePath: String?
     var musicVolume: Double
