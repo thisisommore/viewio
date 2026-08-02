@@ -416,6 +416,9 @@ final class EditorModel: ObservableObject {
     private var wallpaperCancellable: AnyCancellable?
     /// Edit document to apply after media finishes loading (project open).
     private var pendingDocument: ViewioProjectDocument?
+    /// Soft crop from a region recording (normalized 0...1). Applied once the
+    /// source is ready so the user can expand or reset in the Crop tab.
+    private var pendingInitialCropRect: CGRect?
 
     // MARK: Undo / redo
     private static let maxHistoryDepth = 5
@@ -429,9 +432,10 @@ final class EditorModel: ObservableObject {
     /// Used when auto-detection fails or is unavailable (not the slider max).
     private static let fallbackWindowCornerRadius: Double = 38
 
-    init(sourceURL: URL, captureMode: CaptureMode = .display) {
+    init(sourceURL: URL, captureMode: CaptureMode = .display, initialCropRect: CGRect? = nil) {
         self.sourceURL = sourceURL
         self.captureMode = captureMode
+        self.pendingInitialCropRect = initialCropRect.map { CropGeometry.clamped($0) }
         self.isBackgroundEnabled = (captureMode == .window)
         self.backgroundCornerRadius = captureMode == .window
             ? Self.fallbackWindowCornerRadius
@@ -1975,6 +1979,11 @@ final class EditorModel: ObservableObject {
 
                 clips = [EditClip(sourceStart: 0, sourceEnd: seconds)]
                 selectedClipID = clips.first?.id
+                // Soft crop from pre-record region selection (full frame was recorded).
+                if let crop = pendingInitialCropRect {
+                    pendingInitialCropRect = nil
+                    cropRect = crop
+                }
                 rebuildTimelineCursorData()
                 duration = seconds
                 loadState = .ready

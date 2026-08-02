@@ -411,6 +411,26 @@ final class CropGeometryTests: XCTestCase {
         XCTAssertEqual(rect.midX, 0.5, accuracy: 0.001)
         XCTAssertEqual(rect.midY, 0.5, accuracy: 0.001)
     }
+
+    /// Pre-record region (Cocoa bottom-left) → video crop (top-left unit square).
+    func testCropRectFromCocoaRegion() {
+        // Display 1920×1080 at origin; region is center half, Cocoa coords.
+        let display = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let region = CGRect(x: 480, y: 270, width: 960, height: 540)
+        let crop = try XCTUnwrap(CropGeometry.cropRect(region: region, withinDisplay: display))
+        XCTAssertEqual(crop.minX, 0.25, accuracy: 0.001)
+        XCTAssertEqual(crop.width, 0.5, accuracy: 0.001)
+        XCTAssertEqual(crop.height, 0.5, accuracy: 0.001)
+        // Cocoa y=270 is bottom of region; top of region is y=810.
+        // From display top: 1080-810=270 → y = 270/1080 = 0.25.
+        XCTAssertEqual(crop.minY, 0.25, accuracy: 0.001)
+    }
+
+    func testCropRectNearlyFullReturnsNil() {
+        let display = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let almostFull = display.insetBy(dx: 2, dy: 2)
+        XCTAssertNil(CropGeometry.cropRect(region: almostFull, withinDisplay: display))
+    }
 }
 
 final class CropProjectPersistenceTests: XCTestCase {

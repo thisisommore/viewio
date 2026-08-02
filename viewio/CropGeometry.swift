@@ -70,4 +70,27 @@ enum CropGeometry {
         point.x >= crop.minX && point.x <= crop.maxX
             && point.y >= crop.minY && point.y <= crop.maxY
     }
+
+    /// Maps a screen region (Cocoa global, bottom-left origin) into a
+    /// normalized video crop (0...1, top-left origin) relative to a display
+    /// frame in the same Cocoa space. Used so pre-record region selection
+    /// becomes an editable soft crop on a full-frame recording.
+    static func cropRect(region: CGRect, withinDisplay display: CGRect) -> CGRect? {
+        guard display.width > 1, display.height > 1,
+              region.width > 1, region.height > 1 else { return nil }
+        let clampedRegion = region.intersection(display)
+        guard clampedRegion.width > 1, clampedRegion.height > 1 else { return nil }
+        let x = (clampedRegion.minX - display.minX) / display.width
+        // Cocoa Y increases upward; video crop Y increases downward from top.
+        let y = (display.maxY - clampedRegion.maxY) / display.height
+        let w = clampedRegion.width / display.width
+        let h = clampedRegion.height / display.height
+        let rect = clamped(CGRect(x: x, y: y, width: w, height: h))
+        // Essentially the full frame — no soft crop needed.
+        if rect.minX <= 0.005, rect.minY <= 0.005,
+           rect.width >= 0.99, rect.height >= 0.99 {
+            return nil
+        }
+        return rect
+    }
 }

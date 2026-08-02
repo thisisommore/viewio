@@ -54,7 +54,11 @@ struct ContentView: View {
                 )
 
             case let .finished(url):
-                EditorWorkspace(sourceURL: url, captureMode: recorder.captureMode)
+                EditorWorkspace(
+                    sourceURL: url,
+                    captureMode: recorder.captureMode,
+                    initialCropRect: recorder.pendingInitialCropRect
+                )
                     .id("editing")
 
             case let .project(url):
@@ -620,8 +624,8 @@ private struct CaptureSourceSection: View {
             .buttonStyle(SourcePickerCardStyle())
             .help(
                 recorder.captureMode == .region
-                    ? "Clear the region and return to full-screen capture"
-                    : "Drag a region of the screen to record"
+                    ? "Clear the soft crop (full display is still recorded)"
+                    : "Drag a region to soft-crop; full display is recorded so you can expand it later"
             )
             .disabled(!canCapture)
             .permissionGated(isEnabled: canCapture, disabledReason: captureDisabledReason)
@@ -654,7 +658,7 @@ private struct CaptureSourceSection: View {
         if recorder.captureMode == .region, let region = recorder.selectedRegion {
             return "\(Int(region.width.rounded())) × \(Int(region.height.rounded())) pt"
         }
-        return "Record part of the screen"
+        return "Soft crop of screen"
     }
 }
 
@@ -1000,8 +1004,14 @@ private struct EditorWorkspace: View {
     @EnvironmentObject private var unsavedChanges: UnsavedChangesGuard
     @StateObject private var model: EditorModel
 
-    init(sourceURL: URL, captureMode: CaptureMode = .display) {
-        _model = StateObject(wrappedValue: EditorModel(sourceURL: sourceURL, captureMode: captureMode))
+    init(sourceURL: URL, captureMode: CaptureMode = .display, initialCropRect: CGRect? = nil) {
+        _model = StateObject(
+            wrappedValue: EditorModel(
+                sourceURL: sourceURL,
+                captureMode: captureMode,
+                initialCropRect: initialCropRect
+            )
+        )
     }
 
     init(projectURL: URL) {

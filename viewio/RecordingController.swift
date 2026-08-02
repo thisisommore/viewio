@@ -233,6 +233,10 @@ final class RecordingController: NSObject, ObservableObject {
     /// global point coordinates (same space as `NSEvent.mouseLocation`).
     /// Setting it switches `captureMode` to `.region` and clears any picker filter.
     @Published private(set) var selectedRegion: CGRect?
+    /// Soft crop from the last region recording (normalized 0...1, top-left),
+    /// applied when the editor opens so the user can expand/reset. Full
+    /// display was recorded; this is not baked into the file.
+    @Published private(set) var pendingInitialCropRect: CGRect?
     private var regionSelector: RegionSelectionWindowController?
     /// Dim guide around the active region while a region recording is live.
     private var regionGuide: RegionRecordingGuideWindowController?
@@ -902,12 +906,17 @@ final class RecordingController: NSObject, ObservableObject {
             captureBounds = cocoaFrame(forWindowFrame: window.frame)
             targetDisplayID = displayIDContainingWindow(frameInCGSpace: window.frame) ?? displays[0].displayID
         } else if captureMode == .region, let selectedRegion {
-            // Region capture: bounds are the chosen rect itself so the cursor
-            // track normalizes against exactly what is recorded.
+            // Soft region: capture the full display (so the editor can expand
+            // the crop later). Cursor track is full-frame; the selection is
+            // stored as pendingInitialCropRect (normalized video crop).
             capturedWindow = nil
-            captureBounds = selectedRegion
             let regionInCGSpace = cgFrame(forCocoaFrame: selectedRegion)
             targetDisplayID = displayIDContainingWindow(frameInCGSpace: regionInCGSpace) ?? displays[0].displayID
+            captureBounds = displayBoundsInCocoaSpace(displayID: targetDisplayID)
+            pendingInitialCropRect = CropGeometry.cropRect(
+                region: selectedRegion,
+                withinDisplay: captureBounds
+            )
         } else {
             capturedWindow = nil
             let display: SCDisplay
@@ -957,14 +966,19 @@ final class RecordingController: NSObject, ObservableObject {
             overlay.show()
         }
 
-        // Region recording: dim everything outside the crop so the user can
-        // see the live capture bounds. Show before building the filter so
-        // the panels can be excluded from ScreenCaptureKit.
+        // Soft region: keep a dark outside-crop guide on screen while
+        // recording (full display is still captured; guide is excluded via
+        // sharingType.none + filter). Show before building the filter so the
+        // panels can be listed for exclusion.
         if captureMode == .region, let selectedRegion {
             regionGuide?.close()
             let guide = RegionRecordingGuideWindowController(region: selectedRegion)
             regionGuide = guide
             guide.show()
+        } else {
+            regionGuide?.close()
+            regionGuide = nil
+            pendingInitialCropRect = nil
         }
 
         // Build the content filter. Full-screen capture needs a fresh lookup so
@@ -972,9 +986,6 @@ final class RecordingController: NSObject, ObservableObject {
         // the chosen window, so overlays are naturally omitted.
         let filter: SCContentFilter
         let nativeSize: CGSize
-        /// Region capture only: sub-rect of the display to stream, applied to
-        /// `configuration.sourceRect` once the configuration exists.
-        var regionSourceRect: CGRect?
         if let pickedFilter {
             let scale = CGFloat(pickedFilter.pointPixelScale)
             nativeSize = CGSize(
@@ -1009,41 +1020,16 @@ final class RecordingController: NSObject, ObservableObject {
                 width: max(nativeFromFilter.width, nativeFromWindow.width),
                 height: max(nativeFromFilter.height, nativeFromWindow.height)
             )
-        } else if captureMode == .region, let selectedRegion {
-            let captureContent = try await SCShareableContent.current
-            let excludedWindows = overlayWindowsToExclude(from: captureContent)
-            // The bounds pass already resolved the display containing the region.
-            let display = captureContent.displays.first(where: { $0.displayID == targetDisplayID })
-                ?? captureContent.displays[0]
-            filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
-            let scale = CGFloat(filter.pointPixelScale)
-            nativeSize = CGSize(
-                width: selectedRegion.width * scale,
-                height: selectedRegion.height * scale
-            )
-            // sourceRect is in points in the CAPTURED DISPLAY's coordinate
-            // system — (0,0) at that display's own top-left, not the global
-            // space CGDisplayBounds uses — or stream validation fails with
-            // "contentRect does not contain sourceRect".
-            let displayBounds = CGDisplayBounds(display.displayID)
-            let regionInCGSpace = cgFrame(forCocoaFrame: selectedRegion)
-            let local = regionInCGSpace
-                .offsetBy(dx: -displayBounds.minX, dy: -displayBounds.minY)
-                .intersection(CGRect(origin: .zero, size: displayBounds.size))
-            if local.width >= 2, local.height >= 2 {
-                regionSourceRect = local
-            } else {
-                // Degenerate after clamping — capture the full display rather
-                // than handing the stream an empty sourceRect.
-                print("PERM: region rect degenerate after display-local clamp (\(local)) — capturing full display")
-            }
-            print("PERM: region capture display=\(display.displayID) displayBounds=\(displayBounds) contentRect=\(filter.contentRect) sourceRect=\(String(describing: regionSourceRect)) native=\(nativeSize)")
         } else {
+            // Display or soft-region: always capture the full display. Region
+            // mode only stores a soft crop for the editor (no sourceRect).
             let captureContent = try await SCShareableContent.current
             let excludedWindows = overlayWindowsToExclude(from: captureContent)
             let display: SCDisplay
-            if let selectedDisplayID,
-               let selected = captureContent.displays.first(where: { $0.displayID == selectedDisplayID }) {
+            if let selected = captureContent.displays.first(where: { $0.displayID == targetDisplayID }) {
+                display = selected
+            } else if let selectedDisplayID,
+                      let selected = captureContent.displays.first(where: { $0.displayID == selectedDisplayID }) {
                 display = selected
             } else {
                 display = captureContent.displays[0]
@@ -1062,6 +1048,9 @@ final class RecordingController: NSObject, ObservableObject {
                 width: max(nativeFromFilter.width, nativeFromDisplay.width),
                 height: max(nativeFromFilter.height, nativeFromDisplay.height)
             )
+            if captureMode == .region {
+                print("PERM: soft-region capture display=\(display.displayID) fullFrame native=\(nativeSize) crop=\(String(describing: pendingInitialCropRect))")
+            }
         }
         let configuration = SCStreamConfiguration()
 
@@ -1070,9 +1059,6 @@ final class RecordingController: NSObject, ObservableObject {
         // (letterboxing would desync normalized cursor coords from pixels).
         configuration.width = max(2, Int(outputSize.width.rounded()) & ~1)
         configuration.height = max(2, Int(outputSize.height.rounded()) & ~1)
-        if let regionSourceRect {
-            configuration.sourceRect = regionSourceRect
-        }
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: selectedFrameRate.timescale)
         configuration.queueDepth = 8
         // BGRA keeps sharp UI text better than subsampled YUV for screen content.
@@ -1178,6 +1164,8 @@ final class RecordingController: NSObject, ObservableObject {
         let now = Date()
         startedAt = now
         recordingHostStart = ProcessInfo.processInfo.systemUptime
+        // Keep the soft-crop dim guide on top for the whole session.
+        regionGuide?.orderFront()
         startTimer()
         startCursorTracking()
     }
@@ -1504,6 +1492,8 @@ final class RecordingController: NSObject, ObservableObject {
             outputURL = nil
             cameraOutputURL = nil
             cameraCornerURL = nil
+            // Soft crop only applies to a successful finish hand-off.
+            pendingInitialCropRect = nil
         }
     }
 

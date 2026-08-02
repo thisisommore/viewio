@@ -3,9 +3,10 @@
 //  viewio
 //
 //  Lightweight dim overlay shown while a region recording is active so the
-//  user can see which area of the screen is being captured. The recorded
-//  rect stays clear; everything outside is lightly darkened. Panels are
-//  click-through and excluded from capture (`sharingType = .none`).
+//  user can see the intended soft crop. The full display is still recorded;
+//  this guide only previews the crop. The crop rect stays clear; everything
+//  outside is lightly darkened. Panels are click-through and excluded from
+//  capture (`sharingType = .none`).
 //
 
 import AppKit
@@ -60,6 +61,13 @@ final class RegionRecordingGuideWindowController {
         }
     }
 
+    /// Bring guide panels back above other UI (e.g. after capture actually starts).
+    func orderFront() {
+        for panel in panels {
+            panel.orderFrontRegardless()
+        }
+    }
+
     func close() {
         for panel in panels {
             panel.close()
@@ -83,8 +91,9 @@ private final class RegionRecordingGuideView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // Slight dim so the live desktop stays readable outside the crop.
-        let dim = NSColor.black.withAlphaComponent(0.28)
+        // Dark enough to read the soft-crop bounds while recording; still
+        // translucent so the desktop remains usable outside the hole.
+        let dim = NSColor.black.withAlphaComponent(0.42)
         dim.setFill()
 
         guard let hole, !hole.isEmpty else {
@@ -103,12 +112,12 @@ private final class RegionRecordingGuideView: NSView {
             band.fill()
         }
 
-        // Border drawn just outside the hole so it sits outside sourceRect
-        // and is not baked into the recording.
-        let borderRect = hole.insetBy(dx: -1.25, dy: -1.25)
-        NSColor.white.withAlphaComponent(0.85).setStroke()
+        // Border just outside the hole; panels use sharingType.none so the
+        // guide is not baked into the full-display recording.
+        let borderRect = hole.insetBy(dx: -1.5, dy: -1.5)
+        NSColor.white.withAlphaComponent(0.95).setStroke()
         let path = NSBezierPath(rect: borderRect)
-        path.lineWidth = 1.5
+        path.lineWidth = 2
         path.stroke()
     }
 }
