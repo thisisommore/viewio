@@ -166,8 +166,12 @@ private struct RecordingStartView: View {
 
                     RecordingSettingsSection(recorder: recorder, isPreparing: isPreparing)
                 }
-                .padding(32)
-                .frame(maxWidth: 620)
+                // Wider than before so the source cards (fixed copy like
+                // “Record part of the screen”) stay on one line on typical
+                // window sizes; slightly less side padding for the same reason.
+                .padding(.horizontal, 24)
+                .padding(.vertical, 28)
+                .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
             }
 
@@ -557,6 +561,7 @@ private struct CaptureSourceSection: View {
                     Text("Choose…")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(Color.primary.opacity(0.07), in: Capsule())
@@ -578,29 +583,30 @@ private struct CaptureSourceSection: View {
                     recorder.presentRegionSelector()
                 }
             } label: {
-                HStack(spacing: 12) {
+                HStack(alignment: .center, spacing: 12) {
                     Image(systemName: "crop")
                         .font(.system(size: 22))
                         .foregroundStyle(recorder.captureMode == .region ? Color.accentColor : Color.secondary)
                         .frame(width: 28)
 
+                    // Fixed copy / size strings — never ellipsize; wrap instead.
                     VStack(alignment: .leading, spacing: 2) {
                         Text(regionName)
                             .font(.system(size: 13, weight: .medium))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .minimumScaleFactor(0.85)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(CaptureMode.region.title)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
+                    .layoutPriority(1)
 
                     Spacer(minLength: 8)
 
                     Text(recorder.captureMode == .region ? "Reset" : "Select…")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
