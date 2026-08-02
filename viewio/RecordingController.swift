@@ -249,7 +249,7 @@ final class RecordingController: NSObject, ObservableObject {
     @Published private(set) var isCameraGranted = RecordingController.cameraAccessGranted()
     /// Session-only: last permission icon the user tapped, for a single
     /// “Open Settings” helper under Permissions (not persisted — gone on quit).
-    enum PermissionPromptKind: Equatable {
+    enum PermissionPromptKind: String, Equatable, Hashable {
         case screen
         case microphone
         case camera
@@ -386,6 +386,20 @@ final class RecordingController: NSObject, ObservableObject {
         }
     }
 
+    /// Marks which permission icon was last tapped (replaces any previous
+    /// helper). Call before the system request so the UI shows exactly one.
+    private func markPermissionAttempt(_ kind: PermissionPromptKind) {
+        // Always assign so SwiftUI sees a change even when re-tapping the same icon.
+        if lastAttemptedPermission != kind {
+            lastAttemptedPermission = kind
+        } else {
+            // Re-tap same icon: bounce the published value so the helper stays
+            // bound to this kind only (clears any stale multi-helper perception).
+            lastAttemptedPermission = nil
+            lastAttemptedPermission = kind
+        }
+    }
+
     /// Screen Recording consent from the Permissions icon.
     /// Only shows the system TCC dialog (`CGRequestScreenCaptureAccess`).
     /// Never opens System Settings here — after the user has tried, the UI
@@ -397,7 +411,7 @@ final class RecordingController: NSObject, ObservableObject {
             if lastAttemptedPermission == .screen { lastAttemptedPermission = nil }
             return
         }
-        lastAttemptedPermission = .screen
+        markPermissionAttempt(.screen)
         let granted = CGRequestScreenCaptureAccess()
         print("PERM: CGRequestScreenCaptureAccess returned \(granted)")
         if granted || CGPreflightScreenCaptureAccess() {
@@ -410,7 +424,7 @@ final class RecordingController: NSObject, ObservableObject {
     /// Request Microphone from the Permissions icon (explicit UI only).
     /// Does not open Settings — denied state surfaces the in-app helper.
     func requestMicrophoneAccess() {
-        lastAttemptedPermission = .microphone
+        markPermissionAttempt(.microphone)
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         switch status {
         case .authorized:
@@ -435,7 +449,7 @@ final class RecordingController: NSObject, ObservableObject {
     /// Request Camera from the Permissions icon (explicit UI only).
     /// Does not open Settings — denied state surfaces the in-app helper.
     func requestCameraAccess() {
-        lastAttemptedPermission = .camera
+        markPermissionAttempt(.camera)
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         switch status {
         case .authorized:
@@ -528,7 +542,7 @@ final class RecordingController: NSObject, ObservableObject {
 
     /// Instance wrapper that also marks session attempt + refreshes state.
     func requestInputMonitoringAccess() {
-        lastAttemptedPermission = .inputMonitoring
+        markPermissionAttempt(.inputMonitoring)
         if RecordingController.inputMonitoringAccessGranted() {
             isInputMonitoringGranted = true
             lastAttemptedPermission = nil

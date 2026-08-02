@@ -344,14 +344,8 @@ private struct PermissionsSection: View {
 #endif
             }
 
-            // Only the most recently tapped permission — one helper at a time.
-            if let helper = activePermissionHelper {
-                PermissionSettingsHelper(
-                    title: helper.title,
-                    message: helper.message,
-                    openSettings: helper.openSettings
-                )
-            }
+            // Exactly one helper: the last icon the user tapped (session-only).
+            permissionHelperRow
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -362,43 +356,50 @@ private struct PermissionsSection: View {
         }
     }
 
-    private struct ActivePermissionHelper {
-        let title: String
-        let message: String
-        let openSettings: () -> Void
-    }
-
-    /// Single helper for `lastAttemptedPermission` while that access is still off.
-    private var activePermissionHelper: ActivePermissionHelper? {
-        switch recorder.lastAttemptedPermission {
-        case .screen where !recorder.isScreenRecordingGranted:
-            return ActivePermissionHelper(
-                title: "Screen Recording",
-                message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Screen & System Audio Recording, then relaunch if it still looks off.",
-                openSettings: recorder.openScreenRecordingSettings
-            )
-        case .microphone where !recorder.isMicrophoneGranted:
-            return ActivePermissionHelper(
-                title: "Microphone",
-                message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Microphone.",
-                openSettings: recorder.openMicrophoneSettings
-            )
-        case .camera where !recorder.isCameraGranted:
-            return ActivePermissionHelper(
-                title: "Camera",
-                message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Camera.",
-                openSettings: recorder.openCameraSettings
-            )
+    /// Renders at most one helper for `lastAttemptedPermission`.
+    @ViewBuilder
+    private var permissionHelperRow: some View {
+        if let kind = recorder.lastAttemptedPermission {
+            switch kind {
+            case .screen:
+                if !recorder.isScreenRecordingGranted {
+                    PermissionSettingsHelper(
+                        title: "Screen Recording",
+                        message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Screen & System Audio Recording, then relaunch if it still looks off.",
+                        openSettings: recorder.openScreenRecordingSettings
+                    )
+                    .id(kind)
+                }
+            case .microphone:
+                if !recorder.isMicrophoneGranted {
+                    PermissionSettingsHelper(
+                        title: "Microphone",
+                        message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Microphone.",
+                        openSettings: recorder.openMicrophoneSettings
+                    )
+                    .id(kind)
+                }
+            case .camera:
+                if !recorder.isCameraGranted {
+                    PermissionSettingsHelper(
+                        title: "Camera",
+                        message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Camera.",
+                        openSettings: recorder.openCameraSettings
+                    )
+                    .id(kind)
+                }
 #if !APP_STORE
-        case .inputMonitoring where !recorder.isInputMonitoringGranted:
-            return ActivePermissionHelper(
-                title: "Keyboard",
-                message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Input Monitoring.",
-                openSettings: recorder.openInputMonitoringSettings
-            )
+            case .inputMonitoring:
+                if !recorder.isInputMonitoringGranted {
+                    PermissionSettingsHelper(
+                        title: "Keyboard",
+                        message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Input Monitoring.",
+                        openSettings: recorder.openInputMonitoringSettings
+                    )
+                    .id(kind)
+                }
 #endif
-        default:
-            return nil
+            }
         }
     }
 }
