@@ -1207,12 +1207,10 @@ final class RecordingController: NSObject, ObservableObject {
         }
 #if !APP_STORE
         // Keystroke times feed the editor's "hide cursor when typing" option.
-        // A listen-only CGEvent tap fires when the app has Input Monitoring
-        // access (an NSEvent global key monitor would require Accessibility
-        // trust instead). Without the permission the tap isn't created and
-        // the recording just has no typing data — the start page surfaces a
-        // request button. App Store builds skip this entirely: App Review
-        // forbids Input Monitoring there (guideline 2.4.5(v)).
+        // Only installs the tap when Input Monitoring is already granted —
+        // never prompts here. Without permission the recording has no typing
+        // data; the start page banner is the only place that requests access.
+        // App Store builds skip this entirely (guideline 2.4.5(v)).
         startKeyEventTap()
 #endif
         // Immediate sample at t≈0 so the first frame is aligned.
@@ -1238,7 +1236,17 @@ final class RecordingController: NSObject, ObservableObject {
     /// Installs a listen-only CGEvent tap that records keystroke timestamps
     /// (never key identities) into the cursor buffer. The callback runs on
     /// the main run loop; the buffer is thread-safe.
+    ///
+    /// Only creates the tap when Input Monitoring is already granted.
+    /// Calling `CGEvent.tapCreate` while access is still undetermined can
+    /// trigger the system prompt — that prompt is reserved for the explicit
+    /// "Enable Input Monitoring…" control on the start screen / editor.
     private func startKeyEventTap() {
+        guard RecordingController.inputMonitoringAccessGranted() else {
+            // Optional feature: record without typing data until the user
+            // grants access from the start-screen banner.
+            return
+        }
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.tapDisabledByTimeout.rawValue)
             | (1 << CGEventType.tapDisabledByUserInput.rawValue)
@@ -1268,7 +1276,7 @@ final class RecordingController: NSObject, ObservableObject {
             },
             userInfo: refcon
         ) else {
-            // No Input Monitoring access — record without typing data.
+            // Tap failed despite preflight (revoked mid-session, etc.).
             Unmanaged<KeyEventTapContext>.fromOpaque(refcon).release()
             return
         }
