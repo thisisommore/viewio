@@ -570,7 +570,14 @@ private struct CaptureSourceSection: View {
             .disabled(!canCapture)
             .permissionGated(isEnabled: canCapture, disabledReason: captureDisabledReason)
 
-            Button(action: recorder.presentRegionSelector) {
+            Button {
+                if recorder.captureMode == .region {
+                    // Back to the empty “Select…” state; pick again from there.
+                    recorder.clearSelectedRegion()
+                } else {
+                    recorder.presentRegionSelector()
+                }
+            } label: {
                 HStack(spacing: 12) {
                     Image(systemName: "crop")
                         .font(.system(size: 22))
@@ -581,16 +588,20 @@ private struct CaptureSourceSection: View {
                         Text(regionName)
                             .font(.system(size: 13, weight: .medium))
                             .lineLimit(1)
+                            .truncationMode(.tail)
+                            .minimumScaleFactor(0.85)
                         Text(CaptureMode.region.title)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
 
-                    Spacer(minLength: 12)
+                    Spacer(minLength: 8)
 
-                    Text(recorder.captureMode == .region ? "Reselect…" : "Select…")
+                    Text(recorder.captureMode == .region ? "Reset" : "Select…")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(Color.primary.opacity(0.07), in: Capsule())
@@ -601,20 +612,13 @@ private struct CaptureSourceSection: View {
                 .contentShape(RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(SourcePickerCardStyle())
+            .help(
+                recorder.captureMode == .region
+                    ? "Clear the region and return to full-screen capture"
+                    : "Drag a region of the screen to record"
+            )
             .disabled(!canCapture)
             .permissionGated(isEnabled: canCapture, disabledReason: captureDisabledReason)
-
-            if recorder.captureMode == .region {
-                Button(action: recorder.clearSelectedRegion) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Clear region and record the full screen")
-                .disabled(!canCapture)
-                .permissionGated(isEnabled: canCapture, disabledReason: captureDisabledReason)
-            }
         }
     }
 
