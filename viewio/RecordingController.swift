@@ -247,6 +247,17 @@ final class RecordingController: NSObject, ObservableObject {
     @Published private(set) var isMicrophoneGranted = RecordingController.microphoneAccessGranted()
     /// Live Camera TCC state (start page permission icons + camera picker gate).
     @Published private(set) var isCameraGranted = RecordingController.cameraAccessGranted()
+    /// Session-only: last permission icon the user tapped, for a single
+    /// “Open Settings” helper under Permissions (not persisted — gone on quit).
+    enum PermissionPromptKind: Equatable {
+        case screen
+        case microphone
+        case camera
+#if !APP_STORE
+        case inputMonitoring
+#endif
+    }
+    @Published private(set) var lastAttemptedPermission: PermissionPromptKind?
     private var permissionPollTimer: Timer?
 
     private var stream: SCStream?
@@ -341,6 +352,9 @@ final class RecordingController: NSObject, ObservableObject {
 
     private func refreshScreenRecordingAccess() {
         let granted = Self.screenRecordingAccessGranted()
+        if granted, lastAttemptedPermission == .screen {
+            lastAttemptedPermission = nil
+        }
         guard granted != isScreenRecordingGranted else { return }
         print("PERM: screen recording access changed -> \(granted)")
         isScreenRecordingGranted = granted
@@ -348,6 +362,9 @@ final class RecordingController: NSObject, ObservableObject {
 
     private func refreshMicrophoneAccess() {
         let granted = Self.microphoneAccessGranted()
+        if granted, lastAttemptedPermission == .microphone {
+            lastAttemptedPermission = nil
+        }
         guard granted != isMicrophoneGranted else { return }
         isMicrophoneGranted = granted
         // Can't capture mic without permission — clear the selection.
@@ -359,6 +376,9 @@ final class RecordingController: NSObject, ObservableObject {
 
     private func refreshCameraAccess() {
         let granted = Self.cameraAccessGranted()
+        if granted, lastAttemptedPermission == .camera {
+            lastAttemptedPermission = nil
+        }
         guard granted != isCameraGranted else { return }
         isCameraGranted = granted
         if !granted, captureCamera {
@@ -368,62 +388,96 @@ final class RecordingController: NSObject, ObservableObject {
 
     /// Screen Recording consent from the Permissions icon.
     /// Only shows the system TCC dialog (`CGRequestScreenCaptureAccess`).
-    /// Never opens System Settings ourselves — that dialog already has
-    /// "Open System Settings", and opening the pane ourselves caused a
-    /// double-window race (Settings + prompt).
+    /// Never opens System Settings here — after the user has tried, the UI
+    /// can offer an explicit Open Settings control (session memory only).
     func requestScreenRecordingAccess() {
         print("PERM: requestScreenRecordingAccess tapped (preflight=\(CGPreflightScreenCaptureAccess()))")
         if CGPreflightScreenCaptureAccess() {
             isScreenRecordingGranted = true
+            if lastAttemptedPermission == .screen { lastAttemptedPermission = nil }
             return
         }
+        lastAttemptedPermission = .screen
         let granted = CGRequestScreenCaptureAccess()
         print("PERM: CGRequestScreenCaptureAccess returned \(granted)")
         if granted || CGPreflightScreenCaptureAccess() {
             isScreenRecordingGranted = true
+            lastAttemptedPermission = nil
         }
         refreshScreenRecordingAccess()
     }
 
     /// Request Microphone from the Permissions icon (explicit UI only).
+    /// Does not open Settings — denied state surfaces the in-app helper.
     func requestMicrophoneAccess() {
+        lastAttemptedPermission = .microphone
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         switch status {
         case .authorized:
             isMicrophoneGranted = true
+            lastAttemptedPermission = nil
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 Task { @MainActor in
                     self?.isMicrophoneGranted = granted
+                    if granted, self?.lastAttemptedPermission == .microphone {
+                        self?.lastAttemptedPermission = nil
+                    }
                 }
             }
         case .denied, .restricted:
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-                NSWorkspace.shared.open(url)
-            }
+            break
         @unknown default:
             break
         }
     }
 
     /// Request Camera from the Permissions icon (explicit UI only).
+    /// Does not open Settings — denied state surfaces the in-app helper.
     func requestCameraAccess() {
+        lastAttemptedPermission = .camera
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         switch status {
         case .authorized:
             isCameraGranted = true
+            lastAttemptedPermission = nil
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 Task { @MainActor in
                     self?.isCameraGranted = granted
+                    if granted, self?.lastAttemptedPermission == .camera {
+                        self?.lastAttemptedPermission = nil
+                    }
                 }
             }
         case .denied, .restricted:
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
-                NSWorkspace.shared.open(url)
-            }
+            break
         @unknown default:
             break
+        }
+    }
+
+    func openScreenRecordingSettings() {
+        openPrivacySettings(pane: "Privacy_ScreenCapture")
+    }
+
+    func openMicrophoneSettings() {
+        openPrivacySettings(pane: "Privacy_Microphone")
+    }
+
+    func openCameraSettings() {
+        openPrivacySettings(pane: "Privacy_Camera")
+    }
+
+#if !APP_STORE
+    func openInputMonitoringSettings() {
+        openPrivacySettings(pane: "Privacy_ListenEvent")
+    }
+#endif
+
+    private func openPrivacySettings(pane: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -442,6 +496,9 @@ final class RecordingController: NSObject, ObservableObject {
 #if !APP_STORE
     private func refreshInputMonitoringAccess() {
         let granted = RecordingController.inputMonitoringAccessGranted()
+        if granted, lastAttemptedPermission == .inputMonitoring {
+            lastAttemptedPermission = nil
+        }
         guard granted != isInputMonitoringGranted else { return }
         isInputMonitoringGranted = granted
     }
@@ -452,8 +509,6 @@ final class RecordingController: NSObject, ObservableObject {
     /// rejected both Accessibility (2.4.5) and Input Monitoring (2.4.5(v))
     /// for this feature on the Mac App Store, so App Store builds compile
     /// all of this out.
-    /// IOHIDRequestAccess shows the system prompt; if the prompt was already
-    /// answered, the pane is opened so the user can flip the switch manually.
     static let inputMonitoringButtonTitle = "Enable Input Monitoring…"
     static let inputMonitoringInstructions = "Allow viewio in System Settings → Privacy & Security → Input Monitoring."
 
@@ -461,25 +516,29 @@ final class RecordingController: NSObject, ObservableObject {
         IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
     }
 
+    /// System prompt only when still undetermined. Settings open is left to
+    /// the Permissions helper UI after the user has attempted this session.
     static func requestInputMonitoringAccess() {
         let access = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
         if access == kIOHIDAccessTypeUnknown {
-            // Not asked yet: IOHIDRequestAccess shows the system prompt.
-            // Don't also open System Settings — the prompt has its own
-            // "Open System Settings" button.
             _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-        } else if access != kIOHIDAccessTypeGranted,
-                  let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
-            // Previously denied: the prompt won't re-appear, so the pane is
-            // the only way to grant.
-            NSWorkspace.shared.open(url)
         }
+        // Denied / restricted: no auto-open Settings (in-app helper handles it).
     }
 
-    /// Instance wrapper that also refreshes the published state.
+    /// Instance wrapper that also marks session attempt + refreshes state.
     func requestInputMonitoringAccess() {
+        lastAttemptedPermission = .inputMonitoring
+        if RecordingController.inputMonitoringAccessGranted() {
+            isInputMonitoringGranted = true
+            lastAttemptedPermission = nil
+            return
+        }
         RecordingController.requestInputMonitoringAccess()
         isInputMonitoringGranted = RecordingController.inputMonitoringAccessGranted()
+        if isInputMonitoringGranted {
+            lastAttemptedPermission = nil
+        }
     }
 #endif
 

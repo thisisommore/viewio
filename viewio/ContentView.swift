@@ -285,7 +285,8 @@ private struct RecordingStartView: View {
 // MARK: - Permissions icons
 
 /// Row of tappable permission icons under a "Permissions" label. Clicking an
-/// ungranted icon requests access (or opens System Settings when already denied).
+/// ungranted icon requests system access. After a tap, if still not granted,
+/// a session-only helper appears with copy + Open Settings (no auto-open).
 private struct PermissionsSection: View {
     @ObservedObject var recorder: RecordingController
 
@@ -342,6 +343,15 @@ private struct PermissionsSection: View {
                 }
 #endif
             }
+
+            // Only the most recently tapped permission — one helper at a time.
+            if let helper = activePermissionHelper {
+                PermissionSettingsHelper(
+                    title: helper.title,
+                    message: helper.message,
+                    openSettings: helper.openSettings
+                )
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -350,6 +360,69 @@ private struct PermissionsSection: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.primary.opacity(0.1))
         }
+    }
+
+    private struct ActivePermissionHelper {
+        let title: String
+        let message: String
+        let openSettings: () -> Void
+    }
+
+    /// Single helper for `lastAttemptedPermission` while that access is still off.
+    private var activePermissionHelper: ActivePermissionHelper? {
+        switch recorder.lastAttemptedPermission {
+        case .screen where !recorder.isScreenRecordingGranted:
+            return ActivePermissionHelper(
+                title: "Screen Recording",
+                message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Screen & System Audio Recording, then relaunch if it still looks off.",
+                openSettings: recorder.openScreenRecordingSettings
+            )
+        case .microphone where !recorder.isMicrophoneGranted:
+            return ActivePermissionHelper(
+                title: "Microphone",
+                message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Microphone.",
+                openSettings: recorder.openMicrophoneSettings
+            )
+        case .camera where !recorder.isCameraGranted:
+            return ActivePermissionHelper(
+                title: "Camera",
+                message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Camera.",
+                openSettings: recorder.openCameraSettings
+            )
+#if !APP_STORE
+        case .inputMonitoring where !recorder.isInputMonitoringGranted:
+            return ActivePermissionHelper(
+                title: "Keyboard",
+                message: "No popup, or already denied? Enable viewio under System Settings → Privacy & Security → Input Monitoring.",
+                openSettings: recorder.openInputMonitoringSettings
+            )
+#endif
+        default:
+            return nil
+        }
+    }
+}
+
+/// Shown only after the user taps a permission icon and access is still off.
+private struct PermissionSettingsHelper: View {
+    let title: String
+    let message: String
+    let openSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Open Settings…", action: openSettings)
+                .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
