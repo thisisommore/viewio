@@ -234,6 +234,8 @@ final class RecordingController: NSObject, ObservableObject {
     /// Setting it switches `captureMode` to `.region` and clears any picker filter.
     @Published private(set) var selectedRegion: CGRect?
     private var regionSelector: RegionSelectionWindowController?
+    /// Dim guide around the active region while a region recording is live.
+    private var regionGuide: RegionRecordingGuideWindowController?
     /// Shows the confirmation alert before discarding a finished recording.
     @Published var showsDiscardRecordingConfirmation = false
     /// True while an in-progress recording is being torn down without saving.
@@ -899,9 +901,19 @@ final class RecordingController: NSObject, ObservableObject {
             overlay.show()
         }
 
+        // Region recording: dim everything outside the crop so the user can
+        // see the live capture bounds. Show before building the filter so
+        // the panels can be excluded from ScreenCaptureKit.
+        if captureMode == .region, let selectedRegion {
+            regionGuide?.close()
+            let guide = RegionRecordingGuideWindowController(region: selectedRegion)
+            regionGuide = guide
+            guide.show()
+        }
+
         // Build the content filter. Full-screen capture needs a fresh lookup so
-        // the camera overlay window can be excluded; window capture records only
-        // the chosen window, so the overlay is naturally omitted.
+        // overlay/guide windows can be excluded; window capture records only
+        // the chosen window, so overlays are naturally omitted.
         let filter: SCContentFilter
         let nativeSize: CGSize
         /// Region capture only: sub-rect of the display to stream, applied to
@@ -913,17 +925,16 @@ final class RecordingController: NSObject, ObservableObject {
                 width: pickedFilter.contentRect.width * scale,
                 height: pickedFilter.contentRect.height * scale
             )
-            // Rebuild display filters only when the camera overlay must be
-            // excluded — a rebuilt filter loses the picker's consent and macOS
-            // prompts to "bypass the system picker". Without an overlay the
-            // picked filter is used as-is, so no prompt appears. Identity comes
-            // from the filter's own includedDisplays — never frame matching.
+            // Rebuild display filters only when an overlay must be excluded —
+            // a rebuilt filter loses the picker's consent and macOS prompts to
+            // "bypass the system picker". Without overlays the picked filter
+            // is used as-is. Identity comes from the filter's own
+            // includedDisplays — never frame matching.
+            let excluded = overlayWindowsToExclude(from: content)
             if pickedFilter.style == .display,
                let display = pickedFilter.includedDisplays.first,
-               let overlayWindow,
-               let windowNumber = overlayWindow.windowNumber,
-               let overlaySCWindow = content.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
-                filter = SCContentFilter(display: display, excludingWindows: [overlaySCWindow])
+               !excluded.isEmpty {
+                filter = SCContentFilter(display: display, excludingWindows: excluded)
             } else {
                 filter = pickedFilter
             }
@@ -944,14 +955,7 @@ final class RecordingController: NSObject, ObservableObject {
             )
         } else if captureMode == .region, let selectedRegion {
             let captureContent = try await SCShareableContent.current
-            let excludedWindows: [SCWindow]
-            if let overlayWindow,
-               let windowNumber = overlayWindow.windowNumber,
-               let overlaySCWindow = captureContent.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
-                excludedWindows = [overlaySCWindow]
-            } else {
-                excludedWindows = []
-            }
+            let excludedWindows = overlayWindowsToExclude(from: captureContent)
             // The bounds pass already resolved the display containing the region.
             let display = captureContent.displays.first(where: { $0.displayID == targetDisplayID })
                 ?? captureContent.displays[0]
@@ -980,14 +984,7 @@ final class RecordingController: NSObject, ObservableObject {
             print("PERM: region capture display=\(display.displayID) displayBounds=\(displayBounds) contentRect=\(filter.contentRect) sourceRect=\(String(describing: regionSourceRect)) native=\(nativeSize)")
         } else {
             let captureContent = try await SCShareableContent.current
-            let excludedWindows: [SCWindow]
-            if let overlayWindow,
-               let windowNumber = overlayWindow.windowNumber,
-               let overlaySCWindow = captureContent.windows.first(where: { $0.windowID == CGWindowID(windowNumber) }) {
-                excludedWindows = [overlaySCWindow]
-            } else {
-                excludedWindows = []
-            }
+            let excludedWindows = overlayWindowsToExclude(from: captureContent)
             let display: SCDisplay
             if let selectedDisplayID,
                let selected = captureContent.displays.first(where: { $0.displayID == selectedDisplayID }) {
@@ -1443,6 +1440,8 @@ final class RecordingController: NSObject, ObservableObject {
         captureBounds = .zero
         overlayWindow?.close()
         overlayWindow = nil
+        regionGuide?.close()
+        regionGuide = nil
         cameraRecorder?.invalidate()
         cameraRecorder = nil
         if !keepingOutputURL {
@@ -1450,6 +1449,20 @@ final class RecordingController: NSObject, ObservableObject {
             cameraOutputURL = nil
             cameraCornerURL = nil
         }
+    }
+
+    /// Camera PiP + region dim guide windows to keep out of the capture stream.
+    private func overlayWindowsToExclude(from content: SCShareableContent) -> [SCWindow] {
+        var numbers: [Int] = []
+        if let overlayWindow, let number = overlayWindow.windowNumber {
+            numbers.append(number)
+        }
+        if let regionGuide {
+            numbers.append(contentsOf: regionGuide.windowNumbers)
+        }
+        guard !numbers.isEmpty else { return [] }
+        let idSet = Set(numbers.map { CGWindowID($0) })
+        return content.windows.filter { idSet.contains($0.windowID) }
     }
 
     private func discoverCameras() {
