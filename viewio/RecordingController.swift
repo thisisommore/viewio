@@ -239,10 +239,13 @@ final class RecordingController: NSObject, ObservableObject {
     /// True while an in-progress recording is being torn down without saving.
     @Published private(set) var isDiscarding = false
     /// Live Screen Recording (TCC) authorization state, refreshed on a timer
-    /// so the start page can warn before ScreenCaptureKit calls re-trigger the
-    /// system prompt. All ScreenCaptureKit entry points are gated on this.
+    /// so the start page can gate capture UI and avoid ScreenCaptureKit prompts.
     @Published private(set) var isScreenRecordingGranted = RecordingController.screenRecordingAccessGranted()
-    private var screenRecordingTimer: Timer?
+    /// Live Microphone TCC state (start page permission icons + mic picker gate).
+    @Published private(set) var isMicrophoneGranted = RecordingController.microphoneAccessGranted()
+    /// Live Camera TCC state (start page permission icons + camera picker gate).
+    @Published private(set) var isCameraGranted = RecordingController.cameraAccessGranted()
+    private var permissionPollTimer: Timer?
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -273,11 +276,8 @@ final class RecordingController: NSObject, ObservableObject {
     /// Global Cocoa bounds (points, origin bottom-left) of the captured display.
     private var captureBounds: CGRect = .zero
 #if !APP_STORE
-    /// Live Input Monitoring authorization state, refreshed so the start page
-    /// can warn that typing detection ("hide cursor while typing") won't
-    /// capture keys. (Direct builds only — see keyEventTap above.)
+    /// Live Input Monitoring authorization state (direct builds only).
     @Published private(set) var isInputMonitoringGranted = RecordingController.inputMonitoringAccessGranted()
-    private var inputMonitoringTimer: Timer?
 #endif
     /// Host time when capture is considered started (aligns cursor track to video).
     private var recordingHostStart: TimeInterval?
@@ -302,73 +302,155 @@ final class RecordingController: NSObject, ObservableObject {
         discoverCameras()
         discoverMicrophones()
         configureContentPicker()
-        // Track the live Screen Recording authorization state so the UI can
-        // surface it and ScreenCaptureKit calls stay gated (every ungated
-        // SCShareableContent call can re-trigger the system prompt).
-        screenRecordingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        // Poll TCC state so the Permissions icons and gated controls stay in
+        // sync after the user grants access in System Settings (no prompts here).
+        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.refreshScreenRecordingAccess()
+                self?.refreshAllPermissions()
             }
         }
-#if !APP_STORE
-        // Input Monitoring consent is requested from the banner / editor
-        // buttons (no prompt at launch). Track the live authorization state
-        // here so the UI can surface it.
-        inputMonitoringTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.refreshInputMonitoringAccess()
-            }
-        }
-#endif
     }
 
-    // MARK: - Screen Recording permission (TCC)
+    // MARK: - Permissions (TCC)
 
     /// Preflight check — never prompts. Gate every ScreenCaptureKit call on
     /// this: SCShareableContent/SCStream calls while unauthorized are what
     /// re-trigger the system "Screen Recording" prompt again and again.
     static func screenRecordingAccessGranted() -> Bool {
-        let granted = CGPreflightScreenCaptureAccess()
-        print("PERM: preflight screen recording = \(granted)")
-        return granted
+        CGPreflightScreenCaptureAccess()
+    }
+
+    static func microphoneAccessGranted() -> Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
+
+    static func cameraAccessGranted() -> Bool {
+        AVCaptureDevice.authorizationStatus(for: .video) == .authorized
+    }
+
+    private func refreshAllPermissions() {
+        refreshScreenRecordingAccess()
+        refreshMicrophoneAccess()
+        refreshCameraAccess()
+#if !APP_STORE
+        refreshInputMonitoringAccess()
+#endif
     }
 
     private func refreshScreenRecordingAccess() {
-        let granted = CGPreflightScreenCaptureAccess()
+        let granted = Self.screenRecordingAccessGranted()
         guard granted != isScreenRecordingGranted else { return }
         print("PERM: screen recording access changed -> \(granted)")
         isScreenRecordingGranted = granted
     }
 
-    /// Shows the system prompt (only when undetermined); when previously
-    /// denied, macOS returns false without prompting, so open the Settings
-    /// pane instead. Granting may require relaunching the app to take effect.
+    private func refreshMicrophoneAccess() {
+        let granted = Self.microphoneAccessGranted()
+        guard granted != isMicrophoneGranted else { return }
+        isMicrophoneGranted = granted
+        // Can't capture mic without permission — clear the selection.
+        if !granted, captureMicrophone {
+            captureMicrophone = false
+            selectedMicrophoneID = nil
+        }
+    }
+
+    private func refreshCameraAccess() {
+        let granted = Self.cameraAccessGranted()
+        guard granted != isCameraGranted else { return }
+        isCameraGranted = granted
+        if !granted, captureCamera {
+            captureCamera = false
+        }
+    }
+
+    /// Screen Recording consent from the Permissions icon.
+    /// First tap shows only the system prompt (which has its own Settings
+    /// button). Later taps open System Settings, since the prompt won't
+    /// reappear after deny. Never open Settings alongside the first prompt.
+    private static let didRequestScreenRecordingKey = "didRequestScreenRecordingAccess"
+
     func requestScreenRecordingAccess() {
         print("PERM: requestScreenRecordingAccess tapped (preflight=\(CGPreflightScreenCaptureAccess()))")
-        if !CGPreflightScreenCaptureAccess() {
+        if CGPreflightScreenCaptureAccess() {
+            isScreenRecordingGranted = true
+            return
+        }
+
+        let alreadyAsked = UserDefaults.standard.bool(forKey: Self.didRequestScreenRecordingKey)
+        if !alreadyAsked {
+            // First request: system dialog only. CGRequest returns false while
+            // the alert is still up — do not treat that as "open Settings".
+            UserDefaults.standard.set(true, forKey: Self.didRequestScreenRecordingKey)
             let granted = CGRequestScreenCaptureAccess()
             print("PERM: CGRequestScreenCaptureAccess returned \(granted)")
             if granted {
                 isScreenRecordingGranted = true
-                return
             }
+            refreshScreenRecordingAccess()
+            return
         }
+
+        // Already asked once: prompt won't reappear; open Settings so the
+        // user can flip the toggle (may need relaunch after granting).
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             print("PERM: opening System Settings Screen Recording pane")
             NSWorkspace.shared.open(url)
         }
+        refreshScreenRecordingAccess()
     }
 
-    /// Async gate used before recording starts: asks once from the explicit
-    /// Start action instead of letting ScreenCaptureKit prompt mid-capture.
+    /// Request Microphone from the Permissions icon (explicit UI only).
+    func requestMicrophoneAccess() {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch status {
+        case .authorized:
+            isMicrophoneGranted = true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                Task { @MainActor in
+                    self?.isMicrophoneGranted = granted
+                }
+            }
+        case .denied, .restricted:
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    /// Request Camera from the Permissions icon (explicit UI only).
+    func requestCameraAccess() {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        switch status {
+        case .authorized:
+            isCameraGranted = true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                Task { @MainActor in
+                    self?.isCameraGranted = granted
+                }
+            }
+        case .denied, .restricted:
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
+                NSWorkspace.shared.open(url)
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    /// Preflight-only gate used before recording starts. Never prompts —
+    /// Screen Recording is requested only from the Permissions icons.
     /// Returns true when capture may proceed.
-    private func ensureScreenRecordingAccess() async -> Bool {
-        if CGPreflightScreenCaptureAccess() { return true }
-        print("PERM: screen recording not granted at startRecording — requesting")
-        let granted = await Task.detached { CGRequestScreenCaptureAccess() }.value
-        print("PERM: startRecording request returned \(granted), preflight=\(CGPreflightScreenCaptureAccess())")
-        let allowed = granted || CGPreflightScreenCaptureAccess()
+    private func ensureScreenRecordingAccess() -> Bool {
+        let allowed = CGPreflightScreenCaptureAccess()
         isScreenRecordingGranted = allowed
+        if !allowed {
+            print("PERM: screen recording not granted at startRecording — failing without prompt")
+        }
         return allowed
     }
 
@@ -435,21 +517,22 @@ final class RecordingController: NSObject, ObservableObject {
                 if shouldAbortStart() { return }
                 // Gate ScreenCaptureKit on TCC up front — unauthorized
                 // SCShareableContent/SCStream calls re-trigger the system
-                // prompt (sometimes repeatedly) instead of failing cleanly.
-                guard await ensureScreenRecordingAccess() else {
+                // prompt. Never request here: Screen Recording is granted
+                // only via the start-screen banner button.
+                guard ensureScreenRecordingAccess() else {
                     throw RecordingError.screenRecordingDenied
                 }
                 if shouldAbortStart() { return }
+                // Mic/camera access is requested from the Permissions icons —
+                // Start Recording only checks, never prompts.
                 if captureMicrophone {
-                    let authorized = await requestMicrophoneAuthorization()
-                    guard authorized else {
+                    guard Self.microphoneAccessGranted() else {
                         throw RecordingError.microphoneDenied
                     }
                 }
                 if shouldAbortStart() { return }
                 if captureCamera {
-                    let authorized = await CameraRecorder.requestAccess()
-                    guard authorized else {
+                    guard Self.cameraAccessGranted() else {
                         throw RecordingError.cameraDenied
                     }
                 }
@@ -573,10 +656,7 @@ final class RecordingController: NSObject, ObservableObject {
     deinit {
         // Timers / picker cleanup: RecordingController lives on the main actor;
         // window teardown also runs there for StateObject.
-        screenRecordingTimer?.invalidate()
-#if !APP_STORE
-        inputMonitoringTimer?.invalidate()
-#endif
+        permissionPollTimer?.invalidate()
         SCContentSharingPicker.shared.remove(self)
     }
 
@@ -1467,27 +1547,6 @@ final class RecordingController: NSObject, ObservableObject {
         }
     }
 
-    private func requestMicrophoneAuthorization() async -> Bool {
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        switch status {
-        case .authorized:
-            return true
-        case .notDetermined:
-            return await withCheckedContinuation { continuation in
-                AVCaptureDevice.requestAccess(for: .audio) { granted in
-                    continuation.resume(returning: granted)
-                }
-            }
-        case .denied, .restricted:
-            return false
-        @unknown default:
-            return false
-        }
-    }
-
-    func requestCameraAuthorizationIfNeeded() async -> Bool {
-        await CameraRecorder.requestAccess()
-    }
 }
 
 extension RecordingController: SCRecordingOutputDelegate {
@@ -1559,11 +1618,11 @@ private enum RecordingError: LocalizedError {
         case .noWindow:
             "The selected window is no longer available. Choose another window and try again."
         case .screenRecordingDenied:
-            "Screen Recording access was denied. Enable it in System Settings, then relaunch viewio."
+            "Screen Recording access is required. Use Enable Screen Recording on the start screen, then relaunch viewio if needed."
         case .microphoneDenied:
-            "Microphone access was denied. Enable it in System Settings to record microphone audio."
+            "Microphone access is required. Select a microphone again to grant access, or enable it in System Settings."
         case .cameraDenied:
-            "Camera access was denied. Enable it in System Settings to record camera video."
+            "Camera access is required. Select a camera again to grant access, or enable it in System Settings."
         }
     }
 }

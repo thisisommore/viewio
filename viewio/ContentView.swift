@@ -140,6 +140,10 @@ private struct RecordingStartView: View {
     let onRecord: () -> Void
     var onDismissError: (() -> Void)?
 
+    private var canStartRecording: Bool {
+        !isPreparing && recorder.isScreenRecordingGranted
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
@@ -148,23 +152,15 @@ private struct RecordingStartView: View {
                         errorBanner(message: errorMessage)
                     }
 
-#if !APP_STORE
-                    if !recorder.isInputMonitoringGranted {
-                        inputMonitoringBanner
-                    }
-#endif
-
-                    if !recorder.isScreenRecordingGranted {
-                        screenRecordingBanner
-                    }
-
                     VStack(alignment: .leading, spacing: 6) {
                         Text("New Recording")
                             .font(.title2.bold())
-                        Text("Choose what to capture — everything else is ready to go.")
+                        Text("Grant permissions below, then choose what to capture.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
+
+                    PermissionsSection(recorder: recorder)
 
                     CaptureSourceSection(recorder: recorder, isPreparing: isPreparing)
 
@@ -197,7 +193,13 @@ private struct RecordingStartView: View {
                     .tint(.red)
                     .controlSize(.large)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(isPreparing)
+                    .disabled(!canStartRecording)
+                    .permissionGated(
+                        isEnabled: canStartRecording,
+                        disabledReason: isPreparing
+                            ? nil
+                            : "Enable Screen Recording above to start recording"
+                    )
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
@@ -278,59 +280,152 @@ private struct RecordingStartView: View {
         }
     }
 
-    /// Warns that Screen Recording (TCC) access is missing. Without it every
-    /// ScreenCaptureKit call re-triggers the system prompt, so recording is
-    /// gated on this permission. Granting may require an app relaunch.
-    private var screenRecordingBanner: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "rectangle.dashed.badge.record")
+}
+
+// MARK: - Permissions icons
+
+/// Row of tappable permission icons under a "Permissions" label. Clicking an
+/// ungranted icon requests access (or opens System Settings when already denied).
+private struct PermissionsSection: View {
+    @ObservedObject var recorder: RecordingController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Permissions")
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Screen Recording is off")
-                Text("viewio needs Screen Recording access to capture. After granting it in System Settings, relaunch the app if recording still fails.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer()
-            Button("Enable Screen Recording…", action: recorder.requestScreenRecordingAccess)
-        }
-        .font(.callout)
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.primary.opacity(0.15))
-        }
-    }
+
+            HStack(spacing: 10) {
+                PermissionIconButton(
+                    title: "Screen",
+                    systemImage: "rectangle.dashed.badge.record",
+                    isGranted: recorder.isScreenRecordingGranted,
+                    help: recorder.isScreenRecordingGranted
+                        ? "Screen Recording is on"
+                        : "Required to capture the screen. Click to enable."
+                ) {
+                    recorder.requestScreenRecordingAccess()
+                }
+
+                PermissionIconButton(
+                    title: "Microphone",
+                    systemImage: "mic.fill",
+                    isGranted: recorder.isMicrophoneGranted,
+                    help: recorder.isMicrophoneGranted
+                        ? "Microphone is on"
+                        : "Required to record mic audio. Click to enable."
+                ) {
+                    recorder.requestMicrophoneAccess()
+                }
+
+                PermissionIconButton(
+                    title: "Camera",
+                    systemImage: "video.fill",
+                    isGranted: recorder.isCameraGranted,
+                    help: recorder.isCameraGranted
+                        ? "Camera is on"
+                        : "Required for picture-in-picture camera. Click to enable."
+                ) {
+                    recorder.requestCameraAccess()
+                }
 
 #if !APP_STORE
-    /// Warns that keystroke capture (for "hide cursor while typing") is off.
-    /// Optional permission — recording itself works without it.
-    /// (Direct builds only; App Store builds compile typing detection out.)
-    private var inputMonitoringBanner: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "keyboard")
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Input Monitoring is off")
-                Text("Needed to detect typing for the “hide cursor while typing” effect. Optional — recording works without it. \(RecordingController.inputMonitoringInstructions)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                PermissionIconButton(
+                    title: "Keyboard",
+                    systemImage: "keyboard",
+                    isGranted: recorder.isInputMonitoringGranted,
+                    help: recorder.isInputMonitoringGranted
+                        ? "Input Monitoring is on"
+                        : "Optional — enables “hide cursor while typing”. Click to enable."
+                ) {
+                    recorder.requestInputMonitoringAccess()
+                }
+#endif
             }
-            Spacer()
-            Button(RecordingController.inputMonitoringButtonTitle, action: recorder.requestInputMonitoringAccess)
         }
-        .font(.callout)
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.primary.opacity(0.15))
+                .stroke(Color.primary.opacity(0.1))
         }
     }
-#endif
+}
+
+private struct PermissionIconButton: View {
+    let title: String
+    let systemImage: String
+    let isGranted: Bool
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(isGranted ? Color.accentColor : Color.secondary)
+                        .frame(width: 44, height: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(isGranted
+                                      ? Color.accentColor.opacity(0.12)
+                                      : Color.primary.opacity(0.06))
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(isGranted
+                                        ? Color.accentColor.opacity(0.35)
+                                        : Color.primary.opacity(0.1))
+                        }
+
+                    Image(systemName: isGranted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, isGranted ? Color.green : Color.orange)
+                        .offset(x: 4, y: -4)
+                }
+
+                Text(title)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(isGranted ? .primary : .secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel("\(title) permission")
+        .accessibilityValue(isGranted ? "Granted" : "Not granted")
+        .accessibilityHint(isGranted ? "Permission is enabled" : "Double-click to request permission")
+    }
+}
+
+/// Applies a tooltip on disabled controls (SwiftUI `.help` is ignored while disabled).
+private struct PermissionGateModifier: ViewModifier {
+    let isEnabled: Bool
+    let disabledReason: String?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if !isEnabled, let disabledReason {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .help(disabledReason)
+                }
+            }
+    }
+}
+
+private extension View {
+    /// Hover tooltip while a control is gated by a missing permission.
+    func permissionGated(isEnabled: Bool, disabledReason: String?) -> some View {
+        modifier(PermissionGateModifier(isEnabled: isEnabled, disabledReason: disabledReason))
+    }
 }
 
 private struct RecordButtonStyle: ButtonStyle {
@@ -351,6 +446,18 @@ private struct RecordButtonStyle: ButtonStyle {
 private struct CaptureSourceSection: View {
     @ObservedObject var recorder: RecordingController
     let isPreparing: Bool
+
+    private var canCapture: Bool {
+        !isPreparing && recorder.isScreenRecordingGranted
+    }
+
+    private var captureDisabledReason: String? {
+        if isPreparing { return nil }
+        if !recorder.isScreenRecordingGranted {
+            return "Enable Screen Recording above to choose what to capture"
+        }
+        return nil
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -386,7 +493,8 @@ private struct CaptureSourceSection: View {
                 .contentShape(RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(SourcePickerCardStyle())
-            .disabled(isPreparing)
+            .disabled(!canCapture)
+            .permissionGated(isEnabled: canCapture, disabledReason: captureDisabledReason)
 
             Button(action: recorder.presentRegionSelector) {
                 HStack(spacing: 12) {
@@ -419,7 +527,8 @@ private struct CaptureSourceSection: View {
                 .contentShape(RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(SourcePickerCardStyle())
-            .disabled(isPreparing)
+            .disabled(!canCapture)
+            .permissionGated(isEnabled: canCapture, disabledReason: captureDisabledReason)
 
             if recorder.captureMode == .region {
                 Button(action: recorder.clearSelectedRegion) {
@@ -429,7 +538,8 @@ private struct CaptureSourceSection: View {
                 }
                 .buttonStyle(.plain)
                 .help("Clear region and record the full screen")
-                .disabled(isPreparing)
+                .disabled(!canCapture)
+                .permissionGated(isEnabled: canCapture, disabledReason: captureDisabledReason)
             }
         }
     }
@@ -481,7 +591,30 @@ private struct SourcePickerCardStyle: ButtonStyle {
 private struct RecordingSettingsSection: View {
     @ObservedObject var recorder: RecordingController
     let isPreparing: Bool
-    @State private var isRequestingAuthorization = false
+
+    private var canUseMicrophone: Bool {
+        !isPreparing && recorder.isMicrophoneGranted
+    }
+
+    private var canUseCamera: Bool {
+        !isPreparing && recorder.isCameraGranted
+    }
+
+    private var microphoneDisabledReason: String? {
+        if isPreparing { return nil }
+        if !recorder.isMicrophoneGranted {
+            return "Enable Microphone above to use this feature"
+        }
+        return nil
+    }
+
+    private var cameraDisabledReason: String? {
+        if isPreparing { return nil }
+        if !recorder.isCameraGranted {
+            return "Enable Camera above to use this feature"
+        }
+        return nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -538,8 +671,10 @@ private struct RecordingSettingsSection: View {
                             EmptyView()
                         }
                         .labelsHidden()
-                        .disabled(isPreparing)
+                        .disabled(!canUseMicrophone)
+                        .permissionGated(isEnabled: canUseMicrophone, disabledReason: microphoneDisabledReason)
                     }
+                    .opacity(canUseMicrophone || isPreparing ? 1 : 0.55)
                 }
 
                 if !recorder.availableCameras.isEmpty {
@@ -555,8 +690,10 @@ private struct RecordingSettingsSection: View {
                             EmptyView()
                         }
                         .labelsHidden()
-                        .disabled(isPreparing || isRequestingAuthorization)
+                        .disabled(!canUseCamera)
+                        .permissionGated(isEnabled: canUseCamera, disabledReason: cameraDisabledReason)
                     }
+                    .opacity(canUseCamera || isPreparing ? 1 : 0.55)
                 }
             }
             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
@@ -574,14 +711,16 @@ private struct RecordingSettingsSection: View {
         }
     }
 
-    /// Maps the menu picker onto the captureMicrophone/selectedMicrophoneID pair.
+    /// Maps the mic picker onto captureMicrophone/selectedMicrophoneID.
+    /// Permission is granted via the Permissions icons — never from Start.
     private var microphoneSelection: Binding<String?> {
         Binding(
             get: { recorder.captureMicrophone ? recorder.selectedMicrophoneID : nil },
             set: { newValue in
+                guard recorder.isMicrophoneGranted else { return }
                 if let id = newValue {
-                    recorder.captureMicrophone = true
                     recorder.selectedMicrophoneID = id
+                    recorder.captureMicrophone = true
                 } else {
                     recorder.captureMicrophone = false
                     recorder.selectedMicrophoneID = nil
@@ -590,23 +729,17 @@ private struct RecordingSettingsSection: View {
         )
     }
 
-    /// Same mapping for camera, but enabling one requires authorization first.
+    /// Same mapping for camera — permission comes from the Permissions icons.
     private var cameraSelection: Binding<String?> {
         Binding(
             get: { recorder.captureCamera ? recorder.selectedCameraID : nil },
             set: { newValue in
-                guard let id = newValue else {
+                guard recorder.isCameraGranted else { return }
+                if let id = newValue {
+                    recorder.selectedCameraID = id
+                    recorder.captureCamera = true
+                } else {
                     recorder.captureCamera = false
-                    return
-                }
-                Task {
-                    isRequestingAuthorization = true
-                    let granted = await recorder.requestCameraAuthorizationIfNeeded()
-                    isRequestingAuthorization = false
-                    if granted {
-                        recorder.selectedCameraID = id
-                        recorder.captureCamera = true
-                    }
                 }
             }
         )
