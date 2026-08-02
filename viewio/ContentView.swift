@@ -1420,6 +1420,7 @@ private struct CropEditingOverlay: View {
             let view = viewRect(for: rect, in: videoRect)
 
             Canvas { context, _ in
+                // Dim outside the crop. Video is unzoomed while crop editing.
                 var dim = Path(CGRect(origin: .zero, size: container))
                 dim.addPath(Path(view))
                 context.fill(dim, with: .color(.black.opacity(0.45)), style: FillStyle(eoFill: true))

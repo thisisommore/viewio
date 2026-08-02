@@ -2040,7 +2040,13 @@ final class EditorModel: ObservableObject {
 
     private func rebuildPreview(preservingPlayhead: Bool) {
         // Core Animation cursor tool is export-only — never attach it to AVPlayerItem.
-        guard let build = makeComposition(includeCursorOverlay: false, ignoreCrop: isCropEditing) else { return }
+        // Crop tab: full uncropped frame and no zoom transform so the rect can
+        // be edited against real source pixels (zoom is shown as an overlay).
+        guard let build = makeComposition(
+            includeCursorOverlay: false,
+            ignoreCrop: isCropEditing,
+            ignoreZoom: isCropEditing
+        ) else { return }
         let previousPlayhead = preservingPlayhead ? min(playhead, build.duration) : 0
 
         let item = AVPlayerItem(asset: build.composition)
@@ -2083,7 +2089,8 @@ final class EditorModel: ObservableObject {
             sourceTrack: sourceVideoTrack,
             duration: previewCompositionDuration,
             includeCursorOverlay: false,
-            ignoreCrop: isCropEditing
+            ignoreCrop: isCropEditing,
+            ignoreZoom: isCropEditing
         )
     }
 
@@ -2091,7 +2098,8 @@ final class EditorModel: ObservableObject {
         includeCursorOverlay: Bool,
         renderScale: CGFloat = 1,
         frameRate: Int32 = 60,
-        ignoreCrop: Bool = false
+        ignoreCrop: Bool = false,
+        ignoreZoom: Bool = false
     ) -> (
         composition: AVMutableComposition,
         videoComposition: AVMutableVideoComposition,
@@ -2206,7 +2214,8 @@ final class EditorModel: ObservableObject {
             includeCursorOverlay: includeCursorOverlay,
             renderScale: renderScale,
             frameRate: frameRate,
-            ignoreCrop: ignoreCrop
+            ignoreCrop: ignoreCrop,
+            ignoreZoom: ignoreZoom
         )
         return (
             composition,
@@ -2226,7 +2235,8 @@ final class EditorModel: ObservableObject {
         includeCursorOverlay: Bool,
         renderScale: CGFloat = 1,
         frameRate: Int32 = 60,
-        ignoreCrop: Bool = false
+        ignoreCrop: Bool = false,
+        ignoreZoom: Bool = false
     ) -> AVMutableVideoComposition {
         let naturalSize = sourceTrack.naturalSize
         let preferred = sourceTrack.preferredTransform
@@ -2300,10 +2310,12 @@ final class EditorModel: ObservableObject {
             compositionBaseTransform = baseTransform
         }
         // One keyframe timeline shared by video + cursor overlay (critical for lock-on).
+        // Crop editing freezes zoom so the crop rect maps to untransformed pixels.
         let samples = buildZoomTransformSamples(
             baseTransform: baseTransform,
             renderSize: renderSize,
-            duration: duration.seconds
+            duration: duration.seconds,
+            ignoreZoom: ignoreZoom
         )
         // Preview-only state (used by displayCursorPoint in renderSize pixel
         // space) — don't clobber it with reduced-size export transforms.
@@ -2311,7 +2323,7 @@ final class EditorModel: ObservableObject {
             zoomTransformSamples = samples
         }
 
-        let zoomBlur = motionBlurSettings.zoomStrength
+        let zoomBlur = ignoreZoom ? 0 : motionBlurSettings.zoomStrength
         let includeCamera = cameraTrack != nil && cameraSettings.isEnabled
 
         var cameraTransform: CGAffineTransform?
@@ -2367,7 +2379,7 @@ final class EditorModel: ObservableObject {
             var layerInstructions: [AVVideoCompositionLayerInstruction] = []
 
             let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
-            if zoomRanges.isEmpty {
+            if ignoreZoom || zoomRanges.isEmpty {
                 layerInstruction.setTransform(baseTransform, at: .zero)
             } else {
                 applyZoomRamps(
@@ -2390,8 +2402,25 @@ final class EditorModel: ObservableObject {
     private func buildZoomTransformSamples(
         baseTransform: CGAffineTransform,
         renderSize: CGSize,
-        duration: Double
+        duration: Double,
+        ignoreZoom: Bool = false
     ) -> [ZoomTransformSample] {
+        if ignoreZoom || zoomRanges.isEmpty {
+            return [
+                ZoomTransformSample(
+                    time: 0,
+                    transform: baseTransform,
+                    focus: CGPoint(x: 0.5, y: 0.5),
+                    scale: 1
+                ),
+                ZoomTransformSample(
+                    time: duration,
+                    transform: baseTransform,
+                    focus: CGPoint(x: 0.5, y: 0.5),
+                    scale: 1
+                )
+            ]
+        }
         // 30fps is dense enough that linear ramps ≈ evaluating the zoom function live,
         // so the overlay tip stays locked to the pixels under it.
         let step = 1.0 / 30.0
