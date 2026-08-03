@@ -36,6 +36,8 @@ enum GIFExporter {
 
     /// Renders frames at the video composition's frame duration and writes
     /// them to `outputURL`. Progress and completion arrive on the main actor.
+    /// Returns the backing task so callers can cancel an in-flight export.
+    @discardableResult
     static func export(
         composition: AVComposition,
         videoComposition: AVVideoComposition,
@@ -43,8 +45,8 @@ enum GIFExporter {
         frameRate: Int,
         progress: @escaping @MainActor (Double) -> Void,
         completion: @escaping @MainActor (Result<URL, Error>) -> Void
-    ) {
-        Task.detached {
+    ) -> Task<Void, Never> {
+        let task = Task.detached {
             do {
                 let url = try await render(
                     composition: composition,
@@ -55,9 +57,11 @@ enum GIFExporter {
                 )
                 await completion(.success(url))
             } catch {
+                try? FileManager.default.removeItem(at: outputURL)
                 await completion(.failure(error))
             }
         }
+        return task
     }
 
     private static func render(

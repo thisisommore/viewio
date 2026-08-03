@@ -411,6 +411,8 @@ final class EditorModel: ObservableObject {
     private var playheadPollTimer: Timer?
     private var exportSession: AVAssetExportSession?
     private var exportProgressTimer: Timer?
+    /// The running GIF render task, so an in-flight GIF export can be cancelled.
+    private var gifExportTask: Task<Void, Never>?
     private var isSeeking = false
     private let wallpaperManager = WallpaperManager.shared
     private var wallpaperCancellable: AnyCancellable?
@@ -1742,6 +1744,25 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    /// Cancels the in-flight export (video or GIF) and dismisses the overlay.
+    func cancelExport() {
+        guard case .exporting = exportState else { return }
+        exportProgressTimer?.invalidate()
+        exportProgressTimer = nil
+        if let session = exportSession {
+            session.cancelExport()
+        } else {
+            gifExportTask?.cancel()
+        }
+        // Drop references immediately. finishExport() guards on these so a
+        // cancelled session's late completion can't clobber a newer export.
+        exportSession = nil
+        gifExportTask = nil
+        // If cancellation doesn't surface through the session/task completion
+        // (e.g. the worker never reports back), reset the UI right away.
+        exportState = .idle
+    }
+
     private func loadCameraTrack() async -> (AVURLAsset?, AVAssetTrack?, Double, CGSize, CGAffineTransform, CameraSettings) {
         let cameraURL = sourceURL.deletingPathExtension().appendingPathExtension("camera.mp4")
         let settingsURL = sourceURL.deletingPathExtension().appendingPathExtension("cameracorner.json")
@@ -2940,7 +2961,7 @@ final class EditorModel: ObservableObject {
 
         if settings.format.isGIF {
             exportState = .exporting(0)
-            GIFExporter.export(
+            gifExportTask = GIFExporter.export(
                 composition: build.composition,
                 videoComposition: build.videoComposition,
                 to: outputURL,
@@ -2949,11 +2970,16 @@ final class EditorModel: ObservableObject {
                     self?.exportState = .exporting(value)
                 },
                 completion: { [weak self] result in
+                    self?.gifExportTask = nil
                     switch result {
                     case .success(let url):
                         self?.exportState = .completed(url)
                     case .failure(let error):
-                        self?.exportState = .failed(error.localizedDescription)
+                        if error is CancellationError {
+                            self?.exportState = .idle
+                        } else {
+                            self?.exportState = .failed(error.localizedDescription)
+                        }
                     }
                 }
             )
@@ -2998,6 +3024,10 @@ final class EditorModel: ObservableObject {
     }
 
     private func finishExport(session: AVAssetExportSession, outputURL: URL) {
+        // Ignore a stale completion from a previously cancelled export (or one
+        // that was superseded by a new export) so it can't overwrite newer state.
+        guard exportSession === session else { return }
+
         exportProgressTimer?.invalidate()
         exportProgressTimer = nil
         exportSession = nil
@@ -3005,7 +3035,10 @@ final class EditorModel: ObservableObject {
         switch session.status {
         case .completed:
             exportState = .completed(outputURL)
-        case .failed, .cancelled:
+        case .cancelled:
+            // User-initiated cancel: just dismiss the overlay.
+            exportState = .idle
+        case .failed:
             exportState = .failed(session.error?.localizedDescription ?? "Export did not finish.")
         default:
             exportState = .failed("Export ended unexpectedly.")

@@ -1068,7 +1068,11 @@ private struct EditorWorkspace: View {
             ExportOptionsView(model: model)
         }
         .overlay {
-            ExportOverlay(state: model.exportState, dismiss: model.dismissExportMessage)
+            ExportOverlay(
+                state: model.exportState,
+                dismiss: model.dismissExportMessage,
+                cancel: model.cancelExport
+            )
         }
     }
 
@@ -3625,6 +3629,7 @@ private struct ExportOptionsView: View {
 private struct ExportOverlay: View {
     let state: EditorModel.ExportState
     let dismiss: () -> Void
+    let cancel: () -> Void
 
     var body: some View {
         switch state {
@@ -3637,6 +3642,10 @@ private struct ExportOverlay: View {
                     .frame(width: 220)
                 Text("Exporting \(Int(progress * 100))%")
                     .font(.callout)
+                Button("Cancel", role: .cancel) {
+                    cancel()
+                }
+                .keyboardShortcut(.cancelAction)
             }
             .padding(20)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
