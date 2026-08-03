@@ -19,6 +19,8 @@
 	</array>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.video</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>viewio needs screen recording access to capture your screen for recordings.</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
