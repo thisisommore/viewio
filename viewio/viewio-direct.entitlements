@@ -3,7 +3,13 @@
 <plist version="1.0">
 <!-- Direct (Developer ID) distribution: no App Sandbox, so no sandbox-scoped
      entitlements are needed. Hardened runtime is on for notarization, and
-     Input Monitoring access is requested at runtime via IOHIDRequestAccess. -->
+     Input Monitoring access is requested at runtime via IOHIDRequestAccess.
+     Camera/microphone entitlements are still REQUIRED with hardened runtime:
+     without them tccd silently denies access and never shows the TCC prompt. -->
 <dict>
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
 </dict>
 </plist>
