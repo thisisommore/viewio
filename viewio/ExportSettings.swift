@@ -60,6 +60,9 @@ struct ExportSettings: Equatable {
     var format: Format = .mp4H264
     var scale: ResolutionScale = .full
     var frameRate: Int = 60
+    /// When the recording has no audio at all, mux a silent AAC track so the
+    /// file still contains an audio stream (App Store previews require one).
+    var addSilentTrack: Bool = true
 
     var allowedFrameRates: [Int] {
         format.isGIF ? Self.gifFrameRates : Self.videoFrameRates

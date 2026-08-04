@@ -3599,6 +3599,15 @@ private struct ExportOptionsView: View {
                 Text("GIF exports have no audio.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else if model.exportNeedsSilentTrack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Add silent audio track", isOn: $model.exportSettings.addSilentTrack)
+                        .toggleStyle(.switch)
+                    Text("This recording has no audio. Toggling this will add a silent track.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             HStack {

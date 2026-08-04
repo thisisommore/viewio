@@ -346,6 +346,12 @@ final class EditorModel: ObservableObject {
     @Published var cropAspectLock: CGFloat?
     /// Local music file mixed under the video (nil = none).
     @Published private(set) var musicURL: URL?
+
+    /// True if the current export would otherwise contain no audio stream
+    /// (no source audio, no music bed) and isn't a GIF.
+    var exportNeedsSilentTrack: Bool {
+        !exportSettings.format.isGIF && sourceAudioTracks.isEmpty && musicURL == nil
+    }
     @Published private(set) var musicError: String?
     @Published var musicVolume: Double = 0.8
     @Published var isOriginalAudioMuted: Bool = false
@@ -413,6 +419,17 @@ final class EditorModel: ObservableObject {
     private var exportProgressTimer: Timer?
     /// The running GIF render task, so an in-flight GIF export can be cancelled.
     private var gifExportTask: Task<Void, Never>?
+    /// Retained silent-audio asset backing the current export. AVAssetTrack only
+    /// holds a weak reference to its AVAsset, so keeping this alive is required
+    /// for the composition insert and the export; its file is removed when done.
+    private var silentAudioAsset: AVURLAsset?
+    /// If a silent track was synthesized for the current export, remembers the
+    /// fallback config so a mux failure can retry without it (no regression).
+    private var retryWithoutSilent: (outputURL: URL, settings: ExportSettings)?
+    /// Set by cancelExport() so startExport() can bail out while it's between
+    /// async steps (e.g. synthesizing the silent track) before any export
+    /// session/task exists to cancel.
+    private var didCancelExport = false
     private var isSeeking = false
     private let wallpaperManager = WallpaperManager.shared
     private var wallpaperCancellable: AnyCancellable?
@@ -1732,7 +1749,10 @@ final class EditorModel: ObservableObject {
     func export(to outputURL: URL, settings: ExportSettings = ExportSettings()) {
         guard case .ready = loadState else { return }
         guard !clips.isEmpty else { return }
-        startExport(to: outputURL, settings: settings)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.startExport(to: outputURL, settings: settings)
+        }
     }
 
     func dismissExportMessage() {
@@ -1747,6 +1767,7 @@ final class EditorModel: ObservableObject {
     /// Cancels the in-flight export (video or GIF) and dismisses the overlay.
     func cancelExport() {
         guard case .exporting = exportState else { return }
+        didCancelExport = true
         exportProgressTimer?.invalidate()
         exportProgressTimer = nil
         if let session = exportSession {
@@ -1758,6 +1779,8 @@ final class EditorModel: ObservableObject {
         // cancelled session's late completion can't clobber a newer export.
         exportSession = nil
         gifExportTask = nil
+        retryWithoutSilent = nil
+        releaseSilentAudio()
         // If cancellation doesn't surface through the session/task completion
         // (e.g. the worker never reports back), reset the UI right away.
         exportState = .idle
@@ -2946,7 +2969,10 @@ final class EditorModel: ObservableObject {
         )
     }
 
-    private func startExport(to outputURL: URL, settings: ExportSettings) {
+    private func startExport(to outputURL: URL, settings: ExportSettings) async {
+        // A fresh export must not inherit a stale cancellation flag (e.g. from
+        // the silent-track retry path).
+        didCancelExport = false
         // Bake cursor with Core Animation tool — valid for offline export only.
         guard let build = makeComposition(
             includeCursorOverlay: true,
@@ -2958,6 +2984,10 @@ final class EditorModel: ObservableObject {
         }
 
         try? FileManager.default.removeItem(at: outputURL)
+        // Show progress immediately so the overlay and cancel button are
+        // available even while the silent track is being synthesized, which
+        // happens before the export session exists.
+        exportState = .exporting(0)
 
         if settings.format.isGIF {
             exportState = .exporting(0)
@@ -2986,6 +3016,46 @@ final class EditorModel: ObservableObject {
             return
         }
 
+        // Only non-GIF exports with no audio stream at all get a silent track.
+        // Reset the pending fallback first so a stale value from a previous
+        // export can never trigger an erroneous retry.
+        retryWithoutSilent = nil
+        // Only bother when the composition truly has no audio stream, so we
+        // don't wastefully synthesize (and then discard) a file for exports
+        // that already carry their own audio.
+        if settings.addSilentTrack, build.composition.tracks(withMediaType: .audio).isEmpty {
+            // Generate the silent file off the main actor so a long recording
+            // doesn't freeze the UI (the writer blocks while it encodes).
+            let duration = build.duration
+            let silentAsset = await Task.detached(priority: .userInitiated) {
+                Self.makeSilentAudioAsset(duration: duration)
+            }.value
+            if let silentAsset {
+                if await insertSilentAudio(asset: silentAsset, into: build.composition, duration: duration) {
+                    // Retain the asset for the lifetime of the export (AVAssetTrack
+                    // holds only a weak ref to its AVAsset) and remember the fallback
+                    // config so a mux failure can retry without it (no regression).
+                    silentAudioAsset = silentAsset
+                    retryWithoutSilent = (outputURL, settings)
+                } else {
+                    // Composition already has audio (no-op) or the insert threw:
+                    // releaseSilentAudio() only cleans up when it was retained, so
+                    // delete the synthesized file here to avoid leaking it.
+                    try? FileManager.default.removeItem(at: silentAsset.url)
+                }
+            }
+        }
+
+        // The user may have cancelled while we were synthesizing/inserting the
+        // silent track (no export session exists yet to cancel). Bail out and
+        // release any synthesized asset rather than launching an export anyway.
+        if didCancelExport {
+            retryWithoutSilent = nil
+            releaseSilentAudio()
+            exportState = .idle
+            return
+        }
+
         let presetName = settings.format == .mp4HEVC
             ? AVAssetExportPresetHEVCHighestQuality
             : AVAssetExportPresetHighestQuality
@@ -2993,6 +3063,11 @@ final class EditorModel: ObservableObject {
             asset: build.composition,
             presetName: presetName
         ) else {
+            // No session was created, so no finishExport() will run to clean up
+            // the synthesized silent asset — release it here to avoid leaking
+            // the retained asset and its temp file.
+            retryWithoutSilent = nil
+            releaseSilentAudio()
             exportState = .failed("This recording cannot be exported on this Mac.")
             return
         }
@@ -3013,6 +3088,162 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    /// Muxes the audio track of a generated silent asset across the full
+    /// composition, so an audio-less export still carries an audio stream.
+    /// Returns whether a silent track was actually inserted. No-op when the
+    /// composition already has audio or the duration is empty.
+    private func insertSilentAudio(
+        asset: AVURLAsset,
+        into composition: AVMutableComposition,
+        duration: Double
+    ) async -> Bool {
+        guard duration > 0, composition.tracks(withMediaType: .audio).isEmpty else { return false }
+        // The just-written asset's tracks aren't guaranteed to be loaded yet;
+        // the synchronous `tracks` access can return empty for a fresh asset,
+        // so load them asynchronously (startExport is already async).
+        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let audioTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+              ) else { return false }
+        let range = CMTimeRange(start: .zero, duration: CMTime(seconds: duration, preferredTimescale: 600))
+        // Graceful: if AVFoundation can't splice this track in, fall back to the
+        // previous (video-only) export rather than failing the whole operation.
+        do {
+            try audioTrack.insertTimeRange(range, of: track, at: .zero)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Writes a silent AAC stereo file covering `duration` and returns its asset.
+    /// The caller retains the returned asset for the lifetime of the export,
+    /// because the composition references its samples and AVAssetTrack holds only
+    /// a weak reference to its AVAsset; releaseSilentAudio() deletes the temp file
+    /// when the export finishes. AAC is used (not PCM) because PCM tracks from
+    /// temp files aren't insertable.
+    private nonisolated static func makeSilentAudioAsset(duration: Double) -> AVURLAsset? {
+        let sampleRate = 48000.0
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: 256000
+        ]
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("viewio-silent-\(UUID().uuidString).m4a")
+        // Remove the temp file on any setup failure so we never leak .m4a files.
+        func removeTempIfNeeded() { try? FileManager.default.removeItem(at: url) }
+
+        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .m4a) else { return nil }
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
+        guard writer.canAdd(input) else { removeTempIfNeeded(); return nil }
+        writer.add(input)
+        guard writer.startWriting() else { removeTempIfNeeded(); return nil }
+        writer.startSession(atSourceTime: .zero)
+
+        let totalFrames = AVAudioFrameCount(duration * sampleRate)
+        let chunkFrames: AVAudioFrameCount = 1024
+        var written: AVAudioFrameCount = 0
+        var presentationTime = CMTime.zero
+        var failed = false
+        let finished = DispatchSemaphore(value: 0)
+
+        input.requestMediaDataWhenReady(on: DispatchQueue(label: "viewio.silent-audio")) {
+            while written < totalFrames, input.isReadyForMoreMediaData {
+                let frames = min(chunkFrames, totalFrames - written)
+                guard let sampleBuffer = makeSilentPCMBuffer(
+                    frames: frames,
+                    presentationTime: presentationTime,
+                    sampleRate: sampleRate
+                ), input.append(sampleBuffer) else {
+                    // Fast-path failure (guard or rejected append): abort cleanly.
+                    failed = true
+                    break
+                }
+                presentationTime = presentationTime
+                    + CMTime(value: CMTimeValue(frames), timescale: Int32(sampleRate))
+                written += frames
+            }
+            // Only reach a terminal state once all frames are accounted for. If
+            // requestMediaDataWhenReady paused us for backpressure (more frames
+            // remain but the writer isn't ready), just return so it can call us
+            // back with more data; finishing/cancelling here would truncate it.
+            guard written >= totalFrames || failed else { return }
+            input.markAsFinished()
+            // Always reach a terminal state (finish or cancel) and signal, so the
+            // blocking wait below can never deadlock on a stalled writer.
+            if !failed {
+                writer.finishWriting { finished.signal() }
+            } else {
+                writer.cancelWriting()
+                finished.signal()
+            }
+        }
+
+        finished.wait()
+        guard writer.status == .completed else { removeTempIfNeeded(); return nil }
+        return AVURLAsset(url: url)
+    }
+
+    /// Builds one chunk of silent interleaved float32 PCM as a CMSampleBuffer.
+    /// Interleaved (not planar) stereo keeps the block buffer layout unambiguous
+    /// to AVAssetWriter and sidesteps the CrashIfClientProvidedBogusAudioBufferList
+    /// failure that manually-built planar buffers can trigger. Silence is just
+    /// zero-filled samples, so no AVAudioPCMBuffer is needed.
+    private nonisolated static func makeSilentPCMBuffer(
+        frames: AVAudioFrameCount,
+        presentationTime: CMTime,
+        sampleRate: Double
+    ) -> CMSampleBuffer? {
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 2,
+            interleaved: true
+        ) else { return nil }
+        let byteCount = Int(frames) * 2 * MemoryLayout<Float>.size
+        var blockBuffer: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: byteCount,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: byteCount,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        ) == kCMBlockBufferNoErr, let block = blockBuffer,
+              CMBlockBufferFillDataBytes(
+                with: 0, blockBuffer: block, offsetIntoDestination: 0, dataLength: byteCount
+              ) == kCMBlockBufferNoErr
+        else { return nil }
+
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: Int32(sampleRate)),
+            presentationTimeStamp: presentationTime,
+            decodeTimeStamp: .invalid
+        )
+        var sampleBufferOut: CMSampleBuffer?
+        guard CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: block,
+            dataReady: true,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: format.formatDescription,
+            sampleCount: Int(frames),
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
+            sampleBufferOut: &sampleBufferOut
+        ) == noErr, let sampleBuffer = sampleBufferOut else { return nil }
+        return sampleBuffer
+    }
+
     private func startExportProgressTimer(for session: AVAssetExportSession) {
         exportProgressTimer?.invalidate()
         exportProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -3031,6 +3262,7 @@ final class EditorModel: ObservableObject {
         exportProgressTimer?.invalidate()
         exportProgressTimer = nil
         exportSession = nil
+        releaseSilentAudio()
 
         switch session.status {
         case .completed:
@@ -3039,10 +3271,31 @@ final class EditorModel: ObservableObject {
             // User-initiated cancel: just dismiss the overlay.
             exportState = .idle
         case .failed:
+            // If we synthesized a silent track and AVFoundation rejected the mux,
+            // retry once without it so the user still gets a working video-only
+            // export (mirrors prior behavior).
+            if let (url, settings) = retryWithoutSilent {
+                retryWithoutSilent = nil
+                var fallback = settings
+                fallback.addSilentTrack = false
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await self.startExport(to: url, settings: fallback)
+                }
+                return
+            }
             exportState = .failed(session.error?.localizedDescription ?? "Export did not finish.")
         default:
             exportState = .failed("Export ended unexpectedly.")
         }
+    }
+
+    /// Releases the retained silent-audio asset and deletes its temp file. The
+    /// pending retry is cleared by the caller, not here (retry needs it).
+    private func releaseSilentAudio() {
+        guard let asset = silentAudioAsset else { return }
+        silentAudioAsset = nil
+        try? FileManager.default.removeItem(at: asset.url)
     }
 
     private func installTimeObserver() {
