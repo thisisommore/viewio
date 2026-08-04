@@ -743,7 +743,15 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    func seek(to time: Double) {
+    /// Resumes playback from the current playhead. Used to keep playing through
+    /// preview rebuilds (e.g. speed changes) instead of pausing on the user.
+    func resumePlayback() {
+        player.play()
+        isPlaying = true
+        startPlayheadPolling()
+    }
+
+    func seek(to time: Double, completion: (() -> Void)? = nil) {
         let clamped = min(duration, max(0, time))
         playhead = clamped
         isSeeking = true
@@ -761,6 +769,7 @@ final class EditorModel: ObservableObject {
                     if finished {
                         self.syncPlayheadFromPlayer()
                     }
+                    completion?()
                 }
             }
         }
@@ -1015,7 +1024,8 @@ final class EditorModel: ObservableObject {
 
         markDirty()
         rebuildTimelineCursorData()
-        rebuildPreview(preservingPlayhead: true)
+        // Keep playing at the adjusted speed; only the preview item is rebuilt.
+        rebuildPreview(preservingPlayhead: true, resumeIfPlaying: true)
     }
 
     func addZoomRange() {
@@ -2082,7 +2092,7 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    private func rebuildPreview(preservingPlayhead: Bool) {
+    private func rebuildPreview(preservingPlayhead: Bool, resumeIfPlaying: Bool = false) {
         // Core Animation cursor tool is export-only — never attach it to AVPlayerItem.
         // Crop tab: full uncropped frame and no zoom transform so the rect can
         // be edited against real source pixels (zoom is shown as an overlay).
@@ -2092,6 +2102,7 @@ final class EditorModel: ObservableObject {
             ignoreZoom: isCropEditing
         ) else { return }
         let previousPlayhead = preservingPlayhead ? min(playhead, build.duration) : 0
+        let wasPlaying = player.timeControlStatus == .playing || player.rate > 0
 
         let item = AVPlayerItem(asset: build.composition)
         item.videoComposition = build.videoComposition
@@ -2110,8 +2121,14 @@ final class EditorModel: ObservableObject {
         stopPlayheadPolling()
         player.pause()
 
+        let shouldResume = resumeIfPlaying && wasPlaying
         if previousPlayhead > 0 {
-            seek(to: previousPlayhead)
+            seek(to: previousPlayhead) { [weak self] in
+                guard let self, shouldResume else { return }
+                self.resumePlayback()
+            }
+        } else if shouldResume {
+            resumePlayback()
         }
     }
 
