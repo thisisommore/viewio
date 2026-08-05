@@ -16,7 +16,7 @@ enum CursorOverlayBuilder {
     /// Attach a cursor overlay to the video composition when custom cursor is on
     /// and track data is available. Export-only (not valid on AVPlayerItem).
     static func apply(
-        to videoComposition: AVMutableVideoComposition,
+        to videoComposition: inout AVVideoComposition.Configuration,
         settings: CursorSettings,
         motionBlur: MotionBlurSettings,
         processedTrack: [CursorPosition],
@@ -86,8 +86,10 @@ enum CursorOverlayBuilder {
         }
 
         videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(
-            postProcessingAsVideoLayer: videoLayer,
-            in: parentLayer
+            configuration: AVVideoCompositionCoreAnimationTool.Configuration(
+                postProcessingAsVideoLayer: videoLayer,
+                containingLayer: parentLayer
+            )
         )
     }
 

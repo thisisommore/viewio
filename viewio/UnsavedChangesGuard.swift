@@ -40,7 +40,7 @@ final class UnsavedChangesGuard: NSObject, ObservableObject {
 
         let proxy = WindowDelegateProxy(owner: self)
         // Keep SwiftUI's existing delegate so toolbar / traffic-light behavior still works.
-        if let existing = window.delegate as? AnyObject, existing !== proxy {
+        if let existing: AnyObject = window.delegate, existing !== proxy {
             proxy.previous = window.delegate
         }
         proxies[id] = proxy

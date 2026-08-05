@@ -436,10 +436,11 @@ final class RecordingController: NSObject, ObservableObject {
             lastAttemptedPermission = nil
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                guard let self = self else { return }
                 Task { @MainActor in
-                    self?.isMicrophoneGranted = granted
-                    if granted, self?.lastAttemptedPermission == .microphone {
-                        self?.lastAttemptedPermission = nil
+                    self.isMicrophoneGranted = granted
+                    if granted, self.lastAttemptedPermission == .microphone {
+                        self.lastAttemptedPermission = nil
                     }
                 }
             }
@@ -461,10 +462,11 @@ final class RecordingController: NSObject, ObservableObject {
             lastAttemptedPermission = nil
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                guard let self = self else { return }
                 Task { @MainActor in
-                    self?.isCameraGranted = granted
-                    if granted, self?.lastAttemptedPermission == .camera {
-                        self?.lastAttemptedPermission = nil
+                    self.isCameraGranted = granted
+                    if granted, self.lastAttemptedPermission == .camera {
+                        self.lastAttemptedPermission = nil
                     }
                 }
             }

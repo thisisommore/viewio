@@ -42,7 +42,7 @@ struct CursorRenderData {
 }
 
 /// Carries per-frame zoom + motion-blur parameters into the compositor.
-final class ViewioCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol {
+final class ViewioCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol, @unchecked Sendable {
     let timeRange: CMTimeRange
     let enablePostProcessing: Bool = false
     let containsTweening: Bool = true

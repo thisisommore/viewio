@@ -1181,7 +1181,7 @@ private final class TrackingPlayerView: AVPlayerView {
         let video = playerLayer.videoRect
         guard video.width > 1, video.height > 1 else { return bounds }
         // videoRect is in the player layer's space — convert into this view.
-        if let superlayer = playerLayer.superlayer, let host = layer {
+        if playerLayer.superlayer != nil, let host = layer {
             return host.convert(video, from: playerLayer)
         }
         return video

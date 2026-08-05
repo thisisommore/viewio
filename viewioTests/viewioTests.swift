@@ -413,7 +413,7 @@ final class CropGeometryTests: XCTestCase {
     }
 
     /// Pre-record region (Cocoa bottom-left) → video crop (top-left unit square).
-    func testCropRectFromCocoaRegion() {
+    func testCropRectFromCocoaRegion() throws {
         // Display 1920×1080 at origin; region is center half, Cocoa coords.
         let display = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let region = CGRect(x: 480, y: 270, width: 960, height: 540)
@@ -454,6 +454,7 @@ final class CropProjectPersistenceTests: XCTestCase {
         )
     }
 
+    @MainActor
     func testDocumentRoundTripsWithCropRect() throws {
         let crop = CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.6)
         let data = try JSONEncoder().encode(makeDocument(cropRect: crop))
@@ -463,6 +464,7 @@ final class CropProjectPersistenceTests: XCTestCase {
 
     /// Projects saved before the crop feature have no cropRect key — they
     /// must still decode, defaulting to the full frame.
+    @MainActor
     func testDocumentWithoutCropRectDecodesAsNil() throws {
         let data = try JSONEncoder().encode(makeDocument(cropRect: CGRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5)))
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])

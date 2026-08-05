@@ -9,6 +9,14 @@ import Combine
 import Foundation
 import UniformTypeIdentifiers
 
+/// Generic box used to share AVFoundation objects (AVAssetWriter/Input) that
+/// aren't marked Sendable with the AVFoundation callback queue. These AV* types
+/// are documented as safe to use from the queue AVFoundation dispatches to, so
+/// an unchecked box is the intended way to satisfy the concurrency checker.
+private nonisolated final class SendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
 struct EditClip: Identifiable, Codable, Equatable {
     let id: UUID
     var sourceStart: Double
@@ -357,6 +365,9 @@ final class EditorModel: ObservableObject {
     @Published var isOriginalAudioMuted: Bool = false
     /// Loaded audio track of `musicURL` (kept so composition building stays sync).
     private var musicSourceTrack: AVAssetTrack?
+    /// Cached `.timeRange.duration` of the music track, loaded async at track load
+    /// time (the synchronous `track.timeRange` accessor is deprecated).
+    private var musicTrackDuration: CMTime = .zero
     /// The asset must stay alive for its track to remain readable across
     /// composition rebuilds (zoom, trim, speed changes).
     private var musicAsset: AVURLAsset?
@@ -404,6 +415,10 @@ final class EditorModel: ObservableObject {
 
     private var sourceAsset: AVURLAsset?
     private var sourceVideoTrack: AVAssetTrack?
+    /// Cached `.naturalSize`/`.preferredTransform` of the source video track, loaded
+    /// async at track load time (the synchronous accessors are deprecated).
+    private var sourceVideoNaturalSize: CGSize = .zero
+    private var sourceVideoPreferredTransform: CGAffineTransform = .identity
     private var sourceAudioTracks: [AVAssetTrack] = []
     private var cameraAsset: AVURLAsset?
     private var cameraVideoTrack: AVAssetTrack?
@@ -674,6 +689,7 @@ final class EditorModel: ObservableObject {
                 musicURL = nil
                 musicAsset = nil
                 musicSourceTrack = nil
+                musicTrackDuration = .zero
                 musicError = nil
             }
         }
@@ -1214,6 +1230,7 @@ final class EditorModel: ObservableObject {
             }
             musicAsset = asset
             musicSourceTrack = track
+            musicTrackDuration = ((try? await track.load(.timeRange))?.duration) ?? .zero
             musicURL = url
             musicError = nil
             markDirty()
@@ -1226,6 +1243,7 @@ final class EditorModel: ObservableObject {
         musicURL = nil
         musicAsset = nil
         musicSourceTrack = nil
+        musicTrackDuration = .zero
         musicError = nil
         markDirty()
         rebuildPreview(preservingPlayhead: true)
@@ -1640,6 +1658,8 @@ final class EditorModel: ObservableObject {
             guard let videoTrack = videoTracks.first else { return }
             sourceAsset = asset
             sourceVideoTrack = videoTrack
+            sourceVideoNaturalSize = (try? await videoTrack.load(.naturalSize)) ?? .zero
+            sourceVideoPreferredTransform = (try? await videoTrack.load(.preferredTransform)) ?? .identity
             sourceAudioTracks = audioTracks
             sourceCursorTrack = loadCursorTrack()
             sourceClickEvents = loadClickEvents()
@@ -1752,6 +1772,7 @@ final class EditorModel: ObservableObject {
         }
         musicAsset = asset
         musicSourceTrack = track
+        musicTrackDuration = ((try? await track.load(.timeRange))?.duration) ?? .zero
         musicURL = url
         musicError = nil
     }
@@ -1899,7 +1920,7 @@ final class EditorModel: ObservableObject {
         generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .zero
 
-        guard let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) else {
+        guard let cgImage = try? await generator.image(at: .zero).image else {
             return nil
         }
 
@@ -1992,6 +2013,8 @@ final class EditorModel: ObservableObject {
 
             sourceAsset = asset
             sourceVideoTrack = videoTrack
+            sourceVideoNaturalSize = (try? await videoTrack.load(.naturalSize)) ?? .zero
+            sourceVideoPreferredTransform = (try? await videoTrack.load(.preferredTransform)) ?? .identity
             sourceAudioTracks = audioTracks
             sourceCursorTrack = loadCursorTrack()
             sourceClickEvents = loadClickEvents()
@@ -2069,9 +2092,8 @@ final class EditorModel: ObservableObject {
         for index in 0..<count {
             let time = duration * Double(index) / Double(count)
             do {
-                let cgImage = try generator.copyCGImage(
-                    at: CMTime(seconds: time, preferredTimescale: 600),
-                    actualTime: nil
+                let (cgImage, _) = try await generator.image(
+                    at: CMTime(seconds: time, preferredTimescale: 600)
                 )
                 images.append(NSImage(cgImage: cgImage, size: CGSize(width: cgImage.width, height: cgImage.height)))
                 times.append(time)
@@ -2163,7 +2185,7 @@ final class EditorModel: ObservableObject {
         ignoreZoom: Bool = false
     ) -> (
         composition: AVMutableComposition,
-        videoComposition: AVMutableVideoComposition,
+        videoComposition: AVVideoComposition,
         videoTrack: AVMutableCompositionTrack,
         cameraTrack: AVMutableCompositionTrack?,
         duration: Double,
@@ -2254,7 +2276,7 @@ final class EditorModel: ObservableObject {
         compositionMusicTrackID = nil
         if let musicSourceTrack,
            let musicTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            let musicDuration = musicSourceTrack.timeRange.duration
+            let musicDuration = musicTrackDuration
             if musicDuration > .zero {
                 var musicCursor = CMTime.zero
                 while musicCursor < cursor {
@@ -2298,9 +2320,9 @@ final class EditorModel: ObservableObject {
         frameRate: Int32 = 60,
         ignoreCrop: Bool = false,
         ignoreZoom: Bool = false
-    ) -> AVMutableVideoComposition {
-        let naturalSize = sourceTrack.naturalSize
-        let preferred = sourceTrack.preferredTransform
+    ) -> AVVideoComposition {
+        let naturalSize = sourceVideoNaturalSize
+        let preferred = sourceVideoPreferredTransform
         let transformedSize = naturalSize.applying(preferred)
         let orientedSize = CGSize(width: abs(transformedSize.width), height: abs(transformedSize.height))
         // Project-wide crop: content becomes the cropped region of the source
@@ -2334,7 +2356,7 @@ final class EditorModel: ObservableObject {
         }
 
 
-        let videoComposition = AVMutableVideoComposition()
+        var videoComposition = AVVideoComposition.Configuration()
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: frameRate)
         // Tag as BT.709 so players interpret the sRGB-space frames consistently
@@ -2434,29 +2456,31 @@ final class EditorModel: ObservableObject {
             videoComposition.instructions = [instruction]
             videoComposition.customVideoCompositorClass = ViewioVideoCompositor.self
         } else {
-            let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+            let instruction = AVVideoCompositionInstruction(configuration: {
+                var configuration = AVVideoCompositionInstruction.Configuration()
+                configuration.timeRange = CMTimeRange(start: .zero, duration: duration)
 
-            var layerInstructions: [AVVideoCompositionLayerInstruction] = []
+                var layerInstructions: [AVVideoCompositionLayerInstruction] = []
+                var layerInstruction = AVVideoCompositionLayerInstruction.Configuration(assetTrack: compositionTrack)
+                if ignoreZoom || zoomRanges.isEmpty {
+                    layerInstruction.setTransform(baseTransform, at: .zero)
+                } else {
+                    applyZoomRamps(
+                        from: samples,
+                        to: &layerInstruction,
+                        baseTransform: baseTransform,
+                        compositionDuration: duration
+                    )
+                }
+                layerInstructions.append(AVVideoCompositionLayerInstruction(configuration: layerInstruction))
+                configuration.layerInstructions = layerInstructions
+                return configuration
+            }())
 
-            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
-            if ignoreZoom || zoomRanges.isEmpty {
-                layerInstruction.setTransform(baseTransform, at: .zero)
-            } else {
-                applyZoomRamps(
-                    from: samples,
-                    to: layerInstruction,
-                    baseTransform: baseTransform,
-                    compositionDuration: duration
-                )
-            }
-            layerInstructions.append(layerInstruction)
-
-            instruction.layerInstructions = layerInstructions
             videoComposition.instructions = [instruction]
         }
 
-        return videoComposition
+        return AVVideoComposition(configuration: videoComposition)
     }
 
     /// Dense transform samples for video composition AND cursor overlay.
@@ -2827,7 +2851,7 @@ final class EditorModel: ObservableObject {
     /// Apply the shared zoom sample timeline as non-overlapping transform ramps.
     private func applyZoomRamps(
         from samples: [ZoomTransformSample],
-        to layerInstruction: AVMutableVideoCompositionLayerInstruction,
+        to layerInstruction: inout AVVideoCompositionLayerInstruction.Configuration,
         baseTransform: CGAffineTransform,
         compositionDuration: CMTime
     ) {
@@ -2859,10 +2883,12 @@ final class EditorModel: ObservableObject {
             let fromXF = finiteTransform(from.transform) ?? safeBase
             let toXF = finiteTransform(to.transform) ?? safeBase
 
-            layerInstruction.setTransformRamp(
-                fromStart: fromXF,
-                toEnd: toXF,
-                timeRange: clamped
+            layerInstruction.addTransformRamp(
+                AVVideoCompositionLayerInstruction.TransformRamp(
+                    timeRange: clamped,
+                    start: fromXF,
+                    end: toXF
+                )
             )
             rampCount += 1
             // Hard cap for compositor stability on very long timelines.
@@ -2939,7 +2965,7 @@ final class EditorModel: ObservableObject {
     }
 
     private func applyTransformAnimation(
-        to layerInstruction: AVMutableVideoCompositionLayerInstruction,
+        to layerInstruction: inout AVVideoCompositionLayerInstruction.Configuration,
         from startTransform: CGAffineTransform,
         to endTransform: CGAffineTransform,
         start: CMTime,
@@ -2962,10 +2988,12 @@ final class EditorModel: ObservableObject {
             let firstTime = CMTime(seconds: start.seconds + duration * lower, preferredTimescale: 600)
             let secondTime = CMTime(seconds: start.seconds + duration * upper, preferredTimescale: 600)
 
-            layerInstruction.setTransformRamp(
-                fromStart: interpolate(startTransform, endTransform, progress: lowerProgress),
-                toEnd: interpolate(startTransform, endTransform, progress: upperProgress),
-                timeRange: CMTimeRange(start: firstTime, end: secondTime)
+            layerInstruction.addTransformRamp(
+                AVVideoCompositionLayerInstruction.TransformRamp(
+                    timeRange: CMTimeRange(start: firstTime, end: secondTime),
+                    start: interpolate(startTransform, endTransform, progress: lowerProgress),
+                    end: interpolate(startTransform, endTransform, progress: upperProgress)
+                )
             )
         }
     }
@@ -3089,19 +3117,19 @@ final class EditorModel: ObservableObject {
             return
         }
 
-        session.outputURL = outputURL
-        session.outputFileType = settings.format == .movH264 ? .mov : .mp4
         session.videoComposition = build.videoComposition
         session.audioMix = makeAudioMix(for: build.composition)
         session.shouldOptimizeForNetworkUse = true
         exportSession = session
         exportState = .exporting(0)
-        startExportProgressTimer(for: session)
+        startExportProgressTimer()
 
-        session.exportAsynchronously { [weak self] in
-            Task { @MainActor in
-                self?.finishExport(session: session, outputURL: outputURL)
-            }
+        do {
+            let fileType: AVFileType = settings.format == .movH264 ? .mov : .mp4
+            try await session.export(to: outputURL, as: fileType)
+            finishExport(session: session, outputURL: outputURL, error: nil)
+        } catch {
+            finishExport(session: session, outputURL: outputURL, error: error)
         }
     }
 
@@ -3167,7 +3195,11 @@ final class EditorModel: ObservableObject {
         var failed = false
         let finished = DispatchSemaphore(value: 0)
 
+        let writerBox = SendableBox(writer)
+        let inputBox = SendableBox(input)
         input.requestMediaDataWhenReady(on: DispatchQueue(label: "viewio.silent-audio")) {
+            let input = inputBox.value
+            let writer = writerBox.value
             while written < totalFrames, input.isReadyForMoreMediaData {
                 let frames = min(chunkFrames, totalFrames - written)
                 guard let sampleBuffer = makeSilentPCMBuffer(
@@ -3261,17 +3293,19 @@ final class EditorModel: ObservableObject {
         return sampleBuffer
     }
 
-    private func startExportProgressTimer(for session: AVAssetExportSession) {
+    private func startExportProgressTimer() {
         exportProgressTimer?.invalidate()
         exportProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.exportState = .exporting(Double(session.progress))
+                if let session = self.exportSession {
+                    self.exportState = .exporting(Double(session.progress))
+                }
             }
         }
     }
 
-    private func finishExport(session: AVAssetExportSession, outputURL: URL) {
+    private func finishExport(session: AVAssetExportSession, outputURL: URL, error: Error?) {
         // Ignore a stale completion from a previously cancelled export (or one
         // that was superseded by a new export) so it can't overwrite newer state.
         guard exportSession === session else { return }
@@ -3281,30 +3315,31 @@ final class EditorModel: ObservableObject {
         exportSession = nil
         releaseSilentAudio()
 
-        switch session.status {
-        case .completed:
+        guard let error else {
             exportState = .completed(outputURL)
-        case .cancelled:
-            // User-initiated cancel: just dismiss the overlay.
-            exportState = .idle
-        case .failed:
-            // If we synthesized a silent track and AVFoundation rejected the mux,
-            // retry once without it so the user still gets a working video-only
-            // export (mirrors prior behavior).
-            if let (url, settings) = retryWithoutSilent {
-                retryWithoutSilent = nil
-                var fallback = settings
-                fallback.addSilentTrack = false
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    await self.startExport(to: url, settings: fallback)
-                }
-                return
-            }
-            exportState = .failed(session.error?.localizedDescription ?? "Export did not finish.")
-        default:
-            exportState = .failed("Export ended unexpectedly.")
+            return
         }
+
+        // User-initiated cancel: just dismiss the overlay.
+        if error is CancellationError || (error as NSError).code == NSUserCancelledError {
+            exportState = .idle
+            return
+        }
+
+        // If we synthesized a silent track and AVFoundation rejected the mux,
+        // retry once without it so the user still gets a working video-only
+        // export (mirrors prior behavior).
+        if let (url, settings) = retryWithoutSilent {
+            retryWithoutSilent = nil
+            var fallback = settings
+            fallback.addSilentTrack = false
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.startExport(to: url, settings: fallback)
+            }
+            return
+        }
+        exportState = .failed(error.localizedDescription)
     }
 
     /// Releases the retained silent-audio asset and deletes its temp file. The

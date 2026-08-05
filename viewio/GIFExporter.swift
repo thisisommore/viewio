@@ -135,7 +135,7 @@ enum GIFExporter {
             CGImageDestinationAddImage(destination, cgImage, frameProperties as CFDictionary)
 
             let position = CMSampleBufferGetPresentationTimeStamp(sample).seconds
-            await progress(min(1, max(0, position / duration)))
+            progress(min(1, max(0, position / duration)))
         }
 
         if reader.status == .failed {

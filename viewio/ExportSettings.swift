@@ -8,6 +8,11 @@
 import Foundation
 
 struct ExportSettings: Equatable {
+    /// Nonisolated so it can be used as a default argument from synchronous
+    /// nonisolated contexts (e.g. `export(to:settings:)` default parameter),
+    /// which wouldn't be able to call a main-actor-isolated initializer.
+    nonisolated init() {}
+
     enum Format: String, CaseIterable, Identifiable {
         case mp4H264
         case mp4HEVC
