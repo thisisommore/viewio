@@ -234,8 +234,17 @@ jobs:
 
       - name: Archive — Release-Direct (arm64)
         if: steps.version.outputs.changed == 'true'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
+          if [ -z "${APPLE_TEAM_ID:-}" ] || [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::error::Missing secrets APPLE_TEAM_ID / APPLE_SIGNING_IDENTITY for manual Developer ID signing"
+            exit 1
+          fi
+          echo "::add-mask::$APPLE_TEAM_ID"
+          echo "::add-mask::$APPLE_SIGNING_IDENTITY"
           mkdir -p build
           rm -rf build/viewio.xcarchive build/dist/export
           xcodebuild archive \
@@ -243,7 +252,11 @@ jobs:
             -scheme "viewio (Direct)" \
             -configuration Release-Direct \
             -archivePath build/viewio.xcarchive \
-            ARCHS=arm64 2>&1 | tee build/archive.log
+            ARCHS=arm64 \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp" 2>&1 | tee build/archive.log
           echo "Archive contents:"
           ls -lh build/viewio.xcarchive/ || true
           # Quick sanity check the archived app exists
