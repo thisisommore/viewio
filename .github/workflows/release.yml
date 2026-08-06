@@ -1,0 +1,479 @@
+name: Release
+
+# On MARKETING_VERSION change (viewio.xcodeproj/project.pbxproj) on main,
+# build the Release-Direct configuration, Developer ID-sign, notarize + staple
+# both the .app and the DMG, then publish a GitHub Release with the notarized DMG.
+# Mirrors the manual steps in BUILD.md but runs on GitHub-hosted macOS.
+#
+# Required repository Secrets (Settings → Secrets and variables → Actions):
+#   APPLE_DEVELOPER_ID_CERTIFICATE_P12_BASE64  — base64 of the Developer ID Application .p12
+#     e.g.  base64 -i Certificates.p12 | pbcopy   (macOS)  /  base64 -w0 Certificates.p12 (Linux)
+#   APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD    — password for that .p12 (empty string if none)
+#   APPLE_API_KEY_ID                           — App Store Connect API Key ID (e.g. ABC123DEF4)
+#   APPLE_API_ISSUER_ID                        — App Store Connect Issuer ID (UUID)
+#   APPLE_API_KEY_CONTENT                      — base64 of the .p8 API key file (base64 -i AuthKey_XXXX.p8 | pbcopy)
+#   APPLE_TEAM_ID                              — Apple Developer Team ID, e.g. NNJNNZZKNN
+#   APPLE_SIGNING_IDENTITY                     — signing identity, e.g. "Developer ID Application: Om More (NNJNNZZKNN)"
+# Optional Secrets:
+#   KEYCHAIN_PASSWORD                          — password for the ephemeral build keychain (auto-generated if unset)
+#
+# Notarization uses App Store Connect API key only (no Apple ID password).
+# Local notary setup in BUILD.md (`xcrun notarytool store-credentials viewio-notary`) is for
+# manual builds; CI passes --key / --key-id / --issuer directly.
+#
+# Signing certificate setup (one-time, local):
+#   1. Export the Developer ID Application certificate from Keychain Access as .p12.
+#   2. base64 -i Cert.p12 | pbcopy  → paste into APPLE_DEVELOPER_ID_CERTIFICATE_P12_BASE64
+#   3. Store its password in APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD.
+# API key setup: App Store Connect → Users and Access → Keys → generate API key with
+#   Developer role, download .p8 once, base64 -i AuthKey_XXXX.p8 | pbcopy → APPLE_API_KEY_CONTENT.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "viewio.xcodeproj/project.pbxproj"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override version (e.g. 1.2.3). Defaults to MARKETING_VERSION from project.pbxproj"
+        required: false
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve version and decide if release is needed
+        id: version
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Allow manual override via workflow_dispatch input
+          if [ -n "${MANUAL_VERSION:-}" ]; then
+            VERSION="$MANUAL_VERSION"
+            echo "Manual version override: $VERSION"
+          else
+            VERSION=$(grep -m1 'MARKETING_VERSION' viewio.xcodeproj/project.pbxproj | sed -E 's/.*MARKETING_VERSION = ([^;]+);.*/\1/' | tr -d ' "')
+            if [ -z "$VERSION" ]; then
+              echo "::error::Could not extract MARKETING_VERSION from viewio.xcodeproj/project.pbxproj"
+              exit 1
+            fi
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved MARKETING_VERSION: $VERSION"
+
+          # Fetch tags in case checkout didn't fetch all
+          git fetch --tags --force 2>/dev/null || true
+
+          # If tag v$VERSION already exists, skip (version hasn't changed since last release)
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists — no new version, skipping release."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # For push events, also show diff vs previous commit for observability
+          if [ "${{ github.event_name }}" = "push" ]; then
+            PREV=$(git show HEAD~1:viewio.xcodeproj/project.pbxproj 2>/dev/null | grep -m1 'MARKETING_VERSION' | sed -E 's/.*MARKETING_VERSION = ([^;]+);.*/\1/' | tr -d ' "' || echo "")
+            echo "Previous MARKETING_VERSION (HEAD~1): ${PREV:-<none>}"
+            if [ -n "$PREV" ] && [ "$VERSION" = "$PREV" ]; then
+              # This path is reached only if paths filter mis-fired or tag was deleted;
+              # tag check above is the source of truth, so still release if tag missing.
+              echo "MARKETING_VERSION unchanged since HEAD~1 but tag v$VERSION missing — will release."
+            fi
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "Will build and release v$VERSION"
+
+      - name: Early exit — version unchanged
+        if: steps.version.outputs.changed == 'false'
+        run: |
+          echo "No new version to release. Exiting cleanly."
+          exit 0
+
+      - name: Select Xcode
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          echo "Available Xcodes:"
+          ls -la /Applications | grep -i xcode || true
+          xcodebuild -version || true
+          # Prefer Xcode 26 (Tahoe SDK 26.0 deployment target), fall back to latest installed
+          if [ -d "/Applications/Xcode_26.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_26.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_26.0.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_26.0.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_16.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_16.2.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_16.1.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_16.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+          else
+            echo "Using default Xcode at $(xcode-select -p)"
+          fi
+          echo "Selected Xcode:"
+          xcodebuild -version
+          swift --version || true
+          echo "macOS version: $(sw_vers -productVersion) build $(sw_vers -buildVersion)"
+
+      - name: Import Developer ID certificate
+        if: steps.version.outputs.changed == 'true'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_CERTIFICATE_P12_BASE64:-}" ]; then
+            echo "::error::Missing secret APPLE_DEVELOPER_ID_CERTIFICATE_P12_BASE64 — see workflow header for setup."
+            exit 1
+          fi
+          if [ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]; then
+            echo "::warning::APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD is empty — assuming p12 has no password."
+            APPLE_CERTIFICATE_PASSWORD=""
+          fi
+
+          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
+          if [ -z "$KEYCHAIN_PASSWORD" ]; then
+            KEYCHAIN_PASSWORD="ci-$(uuidgen)"
+            echo "Generated ephemeral KEYCHAIN_PASSWORD"
+          fi
+          # Mask it in logs
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+
+          CERT_P12="/tmp/developer-id.p12"
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_P12"
+
+          KEYCHAIN="$HOME/Library/Keychains/build.keychain-db"
+          # Clean any stale keychain from prior run
+          security delete-keychain build.keychain 2>/dev/null || true
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+
+          # Import and allow codesign / xcodebuild without UI prompt
+          security import "$CERT_P12" -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcodebuild -T /usr/bin/productbuild
+          # Enable partition list for codesign (macOS 12+)
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+          # Put build keychain first on the search list
+          security list-keychains -d user -s build.keychain login.keychain 2>/dev/null || security list-keychains -d user -s build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+
+          echo "Identities in build keychain:"
+          security find-identity -v -p codesigning build.keychain || true
+
+          # Verify we can find a Developer ID identity
+          if ! security find-identity -v -p codesigning build.keychain | grep -q "Developer ID Application"; then
+            echo "::warning::No 'Developer ID Application' identity found in build keychain. Build may fail to sign."
+            security find-identity -v build.keychain || true
+          fi
+
+          rm -f "$CERT_P12"
+          # Persist password for later steps (cleanup)
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Prepare build directories and ExportOptions.plist
+        if: steps.version.outputs.changed == 'true'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "::error::Missing secret APPLE_TEAM_ID — required for ExportOptions.plist (e.g. NNJNNZZKNN)"
+            exit 1
+          fi
+          # ExportOptions.plist is gitignored (under build/), so recreate on CI
+          mkdir -p build/dist/staging
+          # Ensure Applications symlink exists in staging (ignored on disk, not in git)
+          if [ ! -e "build/dist/staging/Applications" ]; then
+            ln -s /Applications build/dist/staging/Applications
+            echo "Created staging Applications symlink"
+          fi
+          ls -la build/dist/staging || true
+
+          TEAM_ID="$APPLE_TEAM_ID"
+          cat > build/dist/ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>developer-id</string>
+              <key>teamID</key>
+              <string>${TEAM_ID}</string>
+          </dict>
+          </plist>
+          PLIST
+          echo "Wrote build/dist/ExportOptions.plist (teamID=$TEAM_ID):"
+          cat build/dist/ExportOptions.plist
+
+      - name: Archive — Release-Direct (arm64)
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          rm -rf build/viewio.xcarchive build/dist/export
+          xcodebuild archive \
+            -project viewio.xcodeproj \
+            -scheme "viewio (Direct)" \
+            -configuration Release-Direct \
+            -archivePath build/viewio.xcarchive \
+            ARCHS=arm64 2>&1 | tee build/archive.log
+          echo "Archive contents:"
+          ls -lh build/viewio.xcarchive/ || true
+          # Quick sanity check the archived app exists
+          ls -lh build/viewio.xcarchive/Products/Applications/viewio.app/Contents/MacOS/viewio || true
+
+      - name: Export Developer ID app
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          xcodebuild -exportArchive \
+            -archivePath build/viewio.xcarchive \
+            -exportPath build/dist/export \
+            -exportOptionsPlist build/dist/ExportOptions.plist 2>&1 | tee build/export.log
+          echo "Exported app:"
+          ls -lhR build/dist/export | head -n 80
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/dist/export/viewio.app/Contents/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" build/dist/export/viewio.app/Contents/Info.plist || true
+          codesign -dv --verbose=4 build/dist/export/viewio.app 2>&1 | head -n 80 || true
+
+      - name: Notarize and staple .app
+        if: steps.version.outputs.changed == 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_API_KEY_ID:-}" ] || [ -z "${APPLE_API_ISSUER_ID:-}" ] || [ -z "${APPLE_API_KEY_CONTENT:-}" ]; then
+            echo "::error::Missing notarization secrets. Set APPLE_API_KEY_ID, APPLE_API_ISSUER_ID, and APPLE_API_KEY_CONTENT."
+            exit 1
+          fi
+          cd build/dist/export
+          ditto -c -k --keepParent viewio.app viewio.zip
+          ls -lh viewio.zip
+
+          # Best practice (Apple docs + electron/notarize): direct --key/--key-id/--issuer
+          # for CI — no keychain profile needed (tech.ldas.jp, developer.apple.com)
+          echo "::add-mask::$APPLE_API_KEY_ID"
+          echo "::add-mask::$APPLE_API_ISSUER_ID"
+          API_KEY_FILE="/tmp/AuthKey_${APPLE_API_KEY_ID}.p8"
+          echo "$APPLE_API_KEY_CONTENT" | base64 --decode > "$API_KEY_FILE"
+          chmod 600 "$API_KEY_FILE"
+          mkdir -p ~/.private_keys
+          chmod 700 ~/.private_keys
+          cp "$API_KEY_FILE" ~/.private_keys/
+          chmod 600 ~/.private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
+          echo "Notarizing viewio.zip with App Store Connect API key..."
+          xcrun notarytool submit viewio.zip \
+            --key "$API_KEY_FILE" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait --timeout 30m
+          rm -f "$API_KEY_FILE" ~/.private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
+
+          echo "Stapling ticket to viewio.app..."
+          xcrun stapler staple viewio.app
+          xcrun stapler validate viewio.app || true
+          spctl -a -vv viewio.app 2>&1 | head -n 40 || true
+          cd -
+
+      - name: Build DMG from notarized app
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          cd build/dist
+          rm -rf staging/viewio.app
+          cp -R export/viewio.app staging/
+          # Ensure Applications symlink is still valid
+          if [ ! -e staging/Applications ]; then
+            ln -s /Applications staging/Applications
+          fi
+          ls -la staging/
+          rm -f viewio-macos-arm64.dmg
+          hdiutil create -volname viewio -srcfolder staging -ov -format UDZO viewio-macos-arm64.dmg
+          ls -lh viewio-macos-arm64.dmg
+          cd -
+
+      - name: Sign, notarize and staple DMG
+        if: steps.version.outputs.changed == 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_API_KEY_ID:-}" ] || [ -z "${APPLE_API_ISSUER_ID:-}" ] || [ -z "${APPLE_API_KEY_CONTENT:-}" ]; then
+            echo "::error::Missing notarization secrets. Set APPLE_API_KEY_ID, APPLE_API_ISSUER_ID, and APPLE_API_KEY_CONTENT."
+            exit 1
+          fi
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::error::Missing secret APPLE_SIGNING_IDENTITY — e.g. \"Developer ID Application: Om More (NNJNNZZKNN)\""
+            exit 1
+          fi
+          cd build/dist
+          IDENTITY="$APPLE_SIGNING_IDENTITY"
+          echo "::add-mask::$IDENTITY"
+          echo "Signing DMG with identity: $IDENTITY"
+          # Verify identity is available
+          security find-identity -v -p codesigning build.keychain | grep -F "$IDENTITY" || {
+            echo "::warning::Signing identity '$IDENTITY' not found by exact name; trying any Developer ID identity"
+            security find-identity -v -p codesigning build.keychain || true
+          }
+          codesign --force --sign "$IDENTITY" --timestamp viewio-macos-arm64.dmg
+          codesign -dv --verbose=4 viewio-macos-arm64.dmg 2>&1 | head -n 40 || true
+
+          echo "::add-mask::$APPLE_API_KEY_ID"
+          echo "::add-mask::$APPLE_API_ISSUER_ID"
+          API_KEY_FILE="/tmp/AuthKey_${APPLE_API_KEY_ID}.p8"
+          echo "$APPLE_API_KEY_CONTENT" | base64 --decode > "$API_KEY_FILE"
+          chmod 600 "$API_KEY_FILE"
+          mkdir -p ~/.private_keys
+          chmod 700 ~/.private_keys
+          cp "$API_KEY_FILE" ~/.private_keys/
+          chmod 600 ~/.private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
+          echo "Notarizing DMG with App Store Connect API key..."
+          xcrun notarytool submit viewio-macos-arm64.dmg \
+            --key "$API_KEY_FILE" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait --timeout 30m
+          rm -f "$API_KEY_FILE" ~/.private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
+
+          echo "Stapling ticket to DMG..."
+          xcrun stapler staple viewio-macos-arm64.dmg
+          cd -
+
+      - name: Verify notarized artifacts
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          echo "— Verifying DMG —"
+          spctl -a -vv -t open --context context:primary-signature build/dist/viewio-macos-arm64.dmg 2>&1 | tee /tmp/spctl-dmg.log || {
+            echo "::warning::spctl assessment failed (see log above)"
+            cat /tmp/spctl-dmg.log || true
+          }
+          xcrun stapler validate build/dist/viewio-macos-arm64.dmg 2>&1 | tee /tmp/stapler-dmg.log || {
+            echo "::warning::stapler validate failed for DMG"
+            cat /tmp/stapler-dmg.log || true
+          }
+
+          echo "— Verifying .app inside DMG —"
+          ATTACH_POINT="/tmp/viewio_verify_$$"
+          mkdir -p "$ATTACH_POINT"
+          hdiutil attach -nobrowse -readonly -mountpoint "$ATTACH_POINT" build/dist/viewio-macos-arm64.dmg
+          spctl -a -vv "$ATTACH_POINT/viewio.app" 2>&1 | head -n 40 || true
+          xcrun stapler validate "$ATTACH_POINT/viewio.app" 2>&1 | head -n 20 || true
+          file "$ATTACH_POINT/viewio.app/Contents/MacOS/viewio" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$ATTACH_POINT/viewio.app/Contents/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$ATTACH_POINT/viewio.app/Contents/Info.plist" || true
+          hdiutil detach "$ATTACH_POINT" || hdiutil detach "$ATTACH_POINT" -force || true
+          rmdir "$ATTACH_POINT" 2>/dev/null || true
+
+          echo "— Checksums —"
+          shasum -a 256 build/dist/viewio-macos-arm64.dmg | tee build/dist/SHA256SUMS.txt
+          ls -lh build/dist/
+
+      - name: Prepare versioned DMG copy and release notes
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          cd build/dist
+          # Versioned copy preserves the stapled ticket (file copy, not rebuild)
+          cp viewio-macos-arm64.dmg "viewio-${VERSION}-macos-arm64.dmg"
+          shasum -a 256 "viewio-${VERSION}-macos-arm64.dmg" >> SHA256SUMS.txt
+          echo "Artifacts:"
+          ls -lh viewio-*.dmg SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          cd -
+
+          # Build release notes: prefer docs/RELEASE_NOTES then build/dist/RELEASE_NOTES.md, else auto-generate
+          cat > /tmp/release-notes.md <<EOF
+          ## viewio ${VERSION}
+
+          Notarized arm64 DMG for macOS 26.0+ (Developer ID signed, stapled).
+
+          ### Install
+          1. Download \`viewio-${VERSION}-macos-arm64.dmg\` (or \`viewio-macos-arm64.dmg\` — same file)
+          2. Open the DMG and drag viewio to Applications
+          3. First launch: grant Screen Recording (and Microphone/Camera if you use them) when prompted
+
+          ### Verify (optional)
+          \`\`\`bash
+          spctl -a -vv -t open --context context:primary-signature viewio-${VERSION}-macos-arm64.dmg
+          # → accepted, source=Notarized Developer ID
+          xcrun stapler validate viewio-${VERSION}-macos-arm64.dmg
+          \`\`\`
+
+          ### Checksums
+          \`\`\`
+          $(cat build/dist/SHA256SUMS.txt)
+          \`\`\`
+
+          EOF
+
+          # If a curated notes file exists for this version, prepend it
+          if [ -f "build/dist/RELEASE_NOTES.md" ]; then
+            echo "Found build/dist/RELEASE_NOTES.md — prepending to notes"
+            cat build/dist/RELEASE_NOTES.md > /tmp/curated.md
+            echo "" >> /tmp/curated.md
+            echo "---" >> /tmp/curated.md
+            cat /tmp/release-notes.md >> /tmp/curated.md
+            mv /tmp/curated.md /tmp/release-notes.md
+          fi
+
+          echo "Release notes preview:"
+          cat /tmp/release-notes.md
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: viewio v${{ steps.version.outputs.version }}
+          body_path: /tmp/release-notes.md
+          files: |
+            build/dist/viewio-macos-arm64.dmg
+            build/dist/viewio-${{ steps.version.outputs.version }}-macos-arm64.dmg
+            build/dist/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup keychain
+        if: always() && steps.version.outputs.changed == 'true'
+        run: |
+          security delete-keychain build.keychain 2>/dev/null || true
+          rm -f /tmp/developer-id.p12 /tmp/AuthKey_*.p8 2>/dev/null || true
+          echo "Cleaned ephemeral keychain"
