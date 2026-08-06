@@ -475,8 +475,6 @@ jobs:
           body_path: /tmp/release-notes.md
           files: |
             build/dist/viewio-macos-arm64.dmg
-            build/dist/viewio-${{ steps.version.outputs.version }}-macos-arm64.dmg
-            build/dist/SHA256SUMS.txt
           generate_release_notes: true
           draft: false
           prerelease: false
