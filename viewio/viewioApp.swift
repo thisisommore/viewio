@@ -64,6 +64,7 @@ private struct WindowSessionRoot: View {
     @StateObject private var recorder = RecordingController()
     @StateObject private var unsavedChanges = UnsavedChangesGuard()
     @EnvironmentObject private var wallpaperManager: WallpaperManager
+    @EnvironmentObject private var appearanceManager: AppearanceManager
 
     var body: some View {
         ContentView()
@@ -71,6 +72,8 @@ private struct WindowSessionRoot: View {
             .environmentObject(wallpaperManager)
             .environmentObject(unsavedChanges)
             .focusedSceneValue(\.recordingController, recorder)
+            .preferredColorScheme(appearanceManager.mode.colorScheme)
+            .id(appearanceManager.mode)
             .onAppear {
                 unsavedChanges.onDiscard = { [weak recorder] in
                     recorder?.discardRecording()
@@ -79,6 +82,10 @@ private struct WindowSessionRoot: View {
                     recorder: recorder,
                     unsaved: unsavedChanges
                 )
+                appearanceManager.apply()
+            }
+            .onChange(of: appearanceManager.mode) { _, _ in
+                appearanceManager.apply()
             }
             .onDisappear {
                 ViewioSessionRegistry.shared.unregister(recorder: recorder)
@@ -90,6 +97,7 @@ private struct WindowSessionRoot: View {
 struct viewioApp: App {
     @NSApplicationDelegateAdaptor(ViewioAppDelegate.self) private var appDelegate
     @StateObject private var wallpaperManager = WallpaperManager.shared
+    @StateObject private var appearanceManager = AppearanceManager.shared
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.exportModel) private var exportModel
     @FocusedValue(\.recordingController) private var focusedRecorder
@@ -102,9 +110,19 @@ struct viewioApp: App {
         WindowGroup(id: "main") {
             WindowSessionRoot()
                 .environmentObject(wallpaperManager)
+                .environmentObject(appearanceManager)
         }
         .defaultSize(width: 1100, height: 720)
         .commands {
+            CommandMenu("Appearance") {
+                Picker("Appearance", selection: $appearanceManager.mode) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.inline)
+            }
+
             CommandGroup(replacing: .newItem) {
                 Button("New Recording") {
                     focusedRecorder?.requestNewRecording()
